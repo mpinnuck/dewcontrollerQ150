@@ -29,10 +29,11 @@ from bleak import BleakClient, BleakScanner, BleakError
 # BLE UUIDs (match firmware)
 # ======================================================
 DEVICE_NAME = "Q150DewController"
+DEVICE_MAC = "3982D22B-9B6B-D318-04BE-C3A68E539A8C"  # Known MAC address for fallback
 
 SERVICE_UUID = "ab120000-0000-0000-0000-000000000001"
 STATUS_UUID  = "ab120000-0000-0000-0000-000000000002"
-CONFIG_UUID  = "ab120000-0000-0000-0000-000000000003"
+CONFIG_UUID  = "ab120000-0000-0000-0000-00000000C003"
 INFO_UUID    = "ab120000-0000-0000-0000-000000000004"
 CMD_UUID     = "ab120000-0000-0000-0000-000000000005"
 
@@ -64,8 +65,7 @@ heater_enabled_var = None
 heater_button = None
 
 status_vars = {}
-wifi_ssid_var = None
-wifi_pass_var = None
+manual_power_var = None
 
 table_rows = []  # list of (spread_var, power_var)
 
@@ -76,10 +76,14 @@ table_rows = []  # list of (spread_var, power_var)
 def log(msg: str) -> None:
     if log_text is None:
         return
-    log_text.configure(state=tk.NORMAL)
-    log_text.insert(tk.END, msg + "\n")
-    log_text.see(tk.END)
-    log_text.configure(state=tk.DISABLED)
+    try:
+        log_text.configure(state=tk.NORMAL)
+        log_text.insert(tk.END, msg + "\n")
+        log_text.see(tk.END)
+        log_text.configure(state=tk.DISABLED)
+    except tk.TclError:
+        # Widget has been destroyed (app is closing)
+        pass
 
 
 def set_connected_ui(is_up: bool, detail: str = "") -> None:
@@ -94,10 +98,19 @@ def set_connected_ui(is_up: bool, detail: str = "") -> None:
 # ======================================================
 # JSON helpers
 # ======================================================
-def _safe_json_loads(b: bytes) -> dict:
+def _safe_json_loads(b: bytes, verbose=False) -> dict:
     try:
-        return json.loads(b.decode("utf-8", errors="replace"))
-    except Exception:
+        text = b.decode("utf-8", errors="replace")
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        if verbose:
+            text = b.decode("utf-8", errors="replace")
+            log(f"❌ JSON parse error at pos {e.pos}: {e.msg}")
+            log(f"   Received {len(text)} chars: '{text}'")
+        return {}
+    except Exception as e:
+        if verbose:
+            log(f"❌ Decode error: {e}")
         return {}
 
 def _clamp_int(x: int, lo: int, hi: int) -> int:
@@ -158,17 +171,19 @@ async def find_device_by_name(timeout: float = 6.0):
     for d in devices:
         device_name = d.name or "(unnamed)"
         log(f"  • {device_name} [{d.address}]")
-        # Log advertised service UUIDs if available
-        if hasattr(d, 'metadata') and 'uuids' in d.metadata:
-            log(f"    Services: {d.metadata['uuids']}")
     
-    # Look for our target device by name
+    # Look for our target device by name OR MAC address
     for d in devices:
+        # Match by name
         if (d.name or "").strip() == DEVICE_NAME:
             log(f"✅ Found {DEVICE_NAME} at {d.address}")
             return d
+        # Match by MAC address (for cached device names)
+        if d.address.upper() == DEVICE_MAC.upper():
+            log(f"✅ Found device by MAC address {d.address} (name: {d.name or 'unnamed'})")
+            return d
     
-    log(f"❌ Device '{DEVICE_NAME}' not found in scan results")
+    log(f"❌ Device '{DEVICE_NAME}' or MAC '{DEVICE_MAC}' not found in scan results")
     return None
 
 
@@ -202,6 +217,14 @@ async def connect_to_device(device):
         client = BleakClient(device, disconnected_callback=disconnect_callback)
         log("🔌 Connecting...")
         await client.connect(timeout=10.0)
+        
+        # Try to get/log MTU size for debugging
+        try:
+            mtu = client.mtu_size
+            log(f"📏 MTU size: {mtu} bytes")
+        except:
+            log("📏 MTU size: (unknown)")
+        
         connected = True
         last_device = device  # Store for reconnection
         set_connected_ui(True, f"({device.address})")
@@ -403,10 +426,9 @@ async def read_config():
     try:
         b = await client.read_gatt_char(CONFIG_UUID)
         log(f"📥 CONFIG raw bytes: {b[:100] if len(b) > 100 else b}")  # Debug: show raw data
-        latest_config = _safe_json_loads(b)
+        latest_config = _safe_json_loads(b, verbose=True)
         if not latest_config:
             log("⚠️ CONFIG decode failed - empty or invalid JSON")
-            log(f"   Raw data (decoded): {b.decode('utf-8', errors='replace')}")
             return
 
         log(f"✅ CONFIG read: {json.dumps(latest_config, indent=2)}")
@@ -417,10 +439,7 @@ async def read_config():
         
         # Update heater button appearance
         if heater_button:
-            if heater_enabled:
-                heater_button.config(text="Heater ON", bg="green", fg="white")
-            else:
-                heater_button.config(text="Heater OFF", bg="red", fg="white")
+            set_heater_button(heater_enabled)
 
         # Table
         table = latest_config.get("table", [])
@@ -441,16 +460,6 @@ async def read_config():
             else:
                 spread_var.set("")
                 power_var.set("")
-
-        # Wi-Fi
-        wifi = latest_config.get("wifi", {})
-        if isinstance(wifi, dict):
-            ssid = wifi.get("ssid", "")
-            wifi_ssid_var.set(ssid if ssid is not None else "")
-            # Password typically masked / not present. Leave as-is in UI (do NOT overwrite user entry)
-            # If firmware returns "configured", you could show it; for now just log it.
-            if "configured" in wifi:
-                log(f"📶 WiFi configured: {wifi.get('configured')}")
 
         log("⚙️ CONFIG read")
     except Exception as e:
@@ -516,43 +525,26 @@ async def write_config():
         log(f"❌ CONFIG write failed: {e}")
 
 
-async def write_wifi():
-    """Write SSID/PASS to device (password is write-only)."""
-    if not (client and connected):
-        log("⚠️ Not connected")
-        return
-
-    ssid = wifi_ssid_var.get().strip()
-    pw = wifi_pass_var.get()
-
-    if not ssid:
-        messagebox.showerror("Wi-Fi", "SSID cannot be empty.")
-        return
-    if not pw:
-        # allow empty (open networks) but warn
-        if not messagebox.askyesno("Wi-Fi", "Password is empty. Continue?"):
-            return
-
-    payload = {
-        "wifi": {
-            "ssid": ssid,
-            "pass": pw
-        }
-    }
-
-    try:
-        await client.write_gatt_char(CONFIG_UUID, json.dumps(payload).encode("utf-8"), response=True)
-        log("✅ Wi-Fi credentials written (device should reconnect)")
-        # Do not clear password automatically; user may want to reuse/edit.
-        await asyncio.sleep(0.5)
-        await read_config()
-    except Exception as e:
-        log(f"❌ Wi-Fi write failed: {e}")
-
-
 # ======================================================
 # GUI
 # ======================================================
+def set_heater_button(on: bool):
+    if on:
+        heater_button.config(
+            text="Heater ON",
+            bg="green",
+            fg="white"
+        )
+        heater_button.frame.config(bg="green")
+    else:
+        heater_button.config(
+            text="Heater OFF",
+            bg="red",
+            fg="white"
+        )
+        heater_button.frame.config(bg="red")
+
+
 def toggle_reconnect():
     global reconnect_enabled
     reconnect_enabled = not reconnect_enabled
@@ -567,10 +559,7 @@ async def toggle_heater():
     heater_enabled_var.set(new_state)
     
     # Update button appearance
-    if new_state:
-        heater_button.config(text="Heater ON", bg="green", fg="white")
-    else:
-        heater_button.config(text="Heater OFF", bg="red", fg="white")
+    set_heater_button(new_state)
     
     # Write to device
     await write_config()
@@ -578,10 +567,28 @@ async def toggle_heater():
     log(f"🔥 Heater {'ON' if new_state else 'OFF'}")
 
 
+async def set_manual_power():
+    """Send manual power command to device."""
+    global manual_power_var
+    if not (client and connected):
+        log("⚠️ Not connected - cannot set manual power")
+        return
+    
+    power = manual_power_var.get()
+    try:
+        # Send command via CMD characteristic (format: "power:XX")
+        cmd = f"power:{power}"
+        await client.write_gatt_char(CMD_UUID, cmd.encode("utf-8"), response=False)
+        log(f"🎚️ Manual power: {power}%")
+    except Exception as e:
+        log(f"❌ Failed to set manual power: {e}")
+
+
 def build_gui():
     global root, log_text, conn_label, info_text
-    global heater_enabled_var, status_vars, wifi_ssid_var, wifi_pass_var
-    global table_rows, heater_button
+    global heater_enabled_var, status_vars
+    global table_rows, heater_button, manual_power_var
+    global wifi_ssid_var, wifi_pass_var
 
     root = tk.Tk()
     root.title("Q150 Dew Controller Manager")
@@ -642,13 +649,14 @@ def build_gui():
     info_frame.grid(row=1, column=0, sticky="nsew", pady=(8,0))
     info_frame.grid_rowconfigure(0, weight=1)
     info_frame.grid_columnconfigure(0, weight=1)
+    info_frame.grid_columnconfigure(1, weight=1)
 
     info_text = tk.Text(info_frame, height=10, width=40)
-    info_text.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+    info_text.grid(row=0, column=0, columnspan=2, sticky="nsew", padx=6, pady=6)
     info_text.configure(state=tk.DISABLED)
 
     ttk.Button(info_frame, text="Read INFO",
-               command=lambda: asyncio.create_task(read_info())).grid(row=1, column=0, sticky="ew", padx=6, pady=(0,6))
+               command=lambda: asyncio.create_task(read_info())).grid(row=1, column=0, columnspan=2, sticky="ew", padx=6, pady=(0,6))
 
     # Right column: Config editor
     right = ttk.Frame(top)
@@ -659,16 +667,38 @@ def build_gui():
     cfg_frame.grid(row=0, column=0, sticky="nsew")
     cfg_frame.grid_columnconfigure(0, weight=1)
 
-    heater_enabled_var = tk.BooleanVar(value=True)
+    heater_enabled_var = tk.BooleanVar(value=False)
     ttk.Checkbutton(cfg_frame, text="Heater Enabled", variable=heater_enabled_var).grid(row=0, column=0, sticky="w", padx=6, pady=6)
 
-    # Heater toggle button (using tk.Button for color support) - created after heater_enabled_var
-    heater_button = tk.Button(info_frame, text="Heater ON", bg="green", fg="white",
-                              font=('Helvetica', 12, 'bold'),
-                              activebackground="darkgreen", activeforeground="white",
-                              relief=tk.RAISED, borderwidth=2, padx=10, pady=5,
-                              command=lambda: asyncio.create_task(toggle_heater()))
-    heater_button.grid(row=2, column=0, sticky="ew", padx=6, pady=(6,6))
+    # Heater toggle button (using tk.Label styled as button for reliable colors on macOS)
+    heater_frame = tk.Frame(info_frame, bg="red", relief=tk.RAISED, borderwidth=3)
+    heater_frame.grid(row=2, column=0, columnspan=2, sticky="ew", padx=6, pady=6)
+    heater_button = tk.Label(
+        heater_frame,
+        text="Heater OFF",
+        font=('Helvetica', 11, 'bold'),
+        bg="red",
+        fg="white",
+        cursor="hand2",
+        pady=6
+    )
+    heater_button.pack(fill="both", expand=True)
+    heater_button.bind("<Button-1>", lambda e: asyncio.create_task(toggle_heater()))
+    
+    # Store reference to the frame for border color changes
+    heater_button.frame = heater_frame
+
+    # Right column: Config editor
+    right = ttk.Frame(top)
+    right.grid(row=1, column=1, sticky="nsew")
+    right.grid_rowconfigure(2, weight=1)
+
+    cfg_frame = ttk.LabelFrame(right, text="Configuration (CONFIG)")
+    cfg_frame.grid(row=0, column=0, sticky="nsew")
+    cfg_frame.grid_columnconfigure(0, weight=1)
+
+    heater_enabled_var = tk.BooleanVar(value=False)
+    ttk.Checkbutton(cfg_frame, text="Heater Enabled", variable=heater_enabled_var).grid(row=0, column=0, sticky="w", padx=6, pady=6)
 
     # Spread/Power table editor
     table_frame = ttk.LabelFrame(cfg_frame, text="Spread → Power Table (max 5)")
@@ -686,32 +716,36 @@ def build_gui():
         e1.grid(row=i+1, column=0, padx=6, pady=2, sticky="w")
         e2.grid(row=i+1, column=1, padx=6, pady=2, sticky="w")
 
-    # Wi-Fi editor
-    wifi_frame = ttk.LabelFrame(cfg_frame, text="Wi-Fi (write-only password)")
-    wifi_frame.grid(row=2, column=0, sticky="ew", padx=6, pady=(0,6))
-    wifi_frame.grid_columnconfigure(1, weight=1)
-
-    wifi_ssid_var = tk.StringVar()
-    wifi_pass_var = tk.StringVar()
-
-    ttk.Label(wifi_frame, text="SSID").grid(row=0, column=0, padx=6, pady=4, sticky="w")
-    ttk.Entry(wifi_frame, textvariable=wifi_ssid_var).grid(row=0, column=1, padx=6, pady=4, sticky="ew")
-
-    ttk.Label(wifi_frame, text="Password").grid(row=1, column=0, padx=6, pady=4, sticky="w")
-    ttk.Entry(wifi_frame, textvariable=wifi_pass_var, show="•").grid(row=1, column=1, padx=6, pady=4, sticky="ew")
-
     btns = ttk.Frame(cfg_frame)
-    btns.grid(row=3, column=0, sticky="ew", padx=6, pady=(0,6))
+    btns.grid(row=2, column=0, sticky="ew", padx=6, pady=(0,6))
     btns.grid_columnconfigure(0, weight=1)
     btns.grid_columnconfigure(1, weight=1)
-    btns.grid_columnconfigure(2, weight=1)
 
     ttk.Button(btns, text="Read CONFIG",
                command=lambda: asyncio.create_task(read_config())).grid(row=0, column=0, sticky="ew", padx=(0,4))
     ttk.Button(btns, text="Write CONFIG",
-               command=lambda: asyncio.create_task(write_config())).grid(row=0, column=1, sticky="ew", padx=(4,4))
-    ttk.Button(btns, text="Write Wi-Fi",
-               command=lambda: asyncio.create_task(write_wifi())).grid(row=0, column=2, sticky="ew", padx=(4,0))
+               command=lambda: asyncio.create_task(write_config())).grid(row=0, column=1, sticky="ew", padx=(4,0))
+
+    # Manual heater power slider (0-100%)
+    power_slider_frame = ttk.LabelFrame(cfg_frame, text="Manual Power")
+    power_slider_frame.grid(row=3, column=0, sticky="ew", padx=6, pady=(0,6))
+    manual_power_var = tk.IntVar(value=0)
+    
+    def update_power_label(v):
+        power_label.config(text=f"{int(float(v))}%")
+        asyncio.create_task(set_manual_power())
+    
+    power_slider = ttk.Scale(
+        power_slider_frame,
+        from_=0,
+        to=100,
+        orient=tk.HORIZONTAL,
+        variable=manual_power_var,
+        command=update_power_label
+    )
+    power_slider.pack(fill="x", padx=6, pady=6)
+    power_label = ttk.Label(power_slider_frame, text="0%")
+    power_label.pack(pady=(0, 6))
 
     # Log at bottom
     log_frame = ttk.LabelFrame(root, text="Log")

@@ -1,15 +1,15 @@
 /***********************************************************************
  Q150 Dew Controller
- Board : Seeed XIAO ESP32-C3
+ Board : Seeed XIAO ESP32S3
  Control: BLE only
- Sensor : SHT45 (compiled in but DISABLED for now)
- Source : Weather Station ISYDNEY478
- PWM    : GPIO9 (Arduino pin D9 on XIAO ESP32-C3)
+ Sensor : SHT45 (I2C)
+ PWM    : D8 (Pin 9, Digital IO D8)
+ I2C    : SDA=D4 (Pin 5), SCL=D5 (Pin 6)
 
- Firmware Version: 0.9
+ Firmware Version: 1.0
 ************************************************************************/
 
-#define FIRMWARE_VERSION "0.9"
+#define FIRMWARE_VERSION "1.0"
 #define DEBUG 1   // <<<<<<<<<< SET TO 0 FOR RELEASE BUILD
 
 // =====================================================================
@@ -17,8 +17,8 @@
 // =====================================================================
 #if DEBUG
   #define DEBUG_BEGIN(x)   Serial.begin(x)
-  #define DEBUG_PRINT(x)   do { Serial.print("["); Serial.print(millis()); Serial.print("] "); Serial.print(x); } while(0)
-  #define DEBUG_PRINTLN(x) do { Serial.print("["); Serial.print(millis()); Serial.print("] "); Serial.println(x); } while(0)
+  #define DEBUG_PRINT(x)   Serial.print(x)
+  #define DEBUG_PRINTLN(x) Serial.println(x)
 #else
   #define DEBUG_BEGIN(x)
   #define DEBUG_PRINT(x)
@@ -26,27 +26,30 @@
 #endif
 
 #include <Arduino.h>
-#include <WiFi.h>
-#include <HTTPClient.h>
+#include <Wire.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
-#include <NimBLEDevice.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+#include <Adafruit_SHT4x.h>
 
 // =====================================================================
 // =========================== HARDWARE =================================
 // =====================================================================
-#define HEATER_PWM_PIN D9           // GPIO9 on XIAO ESP32-C3
+#define HEATER_PWM_PIN D8           // Pin 9, Digital IO D8 on XIAO ESP32S3
+#define I2C_SDA D4                   // Pin 5, Digital IO D4
+#define I2C_SCL D5                   // Pin 6, Digital IO D5
 
 static constexpr int PWM_FREQ_HZ   = 1000;
 static constexpr int PWM_RES_BITS  = 10;
 static constexpr int PWM_MAX       = (1 << PWM_RES_BITS) - 1;
 
 // =====================================================================
-// ======================= WEATHER STATION ===============================
+// =========================== SENSOR ===================================
 // =====================================================================
-static const char* WEATHER_API_URL =
-  "https://api.weather.com/v2/pws/observations/current?"
-  "stationId=ISYDNEY478&format=json&units=m&apiKey=5356e369de454c6f96e369de450c6f22";
+static Adafruit_SHT4x sht4 = Adafruit_SHT4x();
 
 // =====================================================================
 // =========================== DEW MATH =================================
@@ -80,9 +83,6 @@ struct Config {
     {0.0f, 0},
     {0.0f, 0}
   };
-
-  String wifiSSID = "MicroConcepts-2G";
-  String wifiPass = "leanneannatinka";
 };
 
 static Config g_cfg;
@@ -96,8 +96,6 @@ static uint8_t powerFromSpread(const Config& cfg, float spreadC);
 // =====================================================================
 // =========================== SENSOR ===================================
 // =====================================================================
-enum class DataSource : uint8_t { WEATHER };
-static DataSource g_source = DataSource::WEATHER;
 
 // =====================================================================
 // =========================== STATE ====================================
@@ -107,69 +105,83 @@ static float g_RH = NAN;
 static float g_Td = NAN;
 static float g_spread = NAN;
 static uint8_t g_powerPct = 0;
+static bool g_manual_mode = false;   // manual power override mode
+static uint8_t g_manual_power = 0;   // manual power value (0-100)
 
 // =====================================================================
 // ============================= BLE ====================================
 // =====================================================================
 static const char* BLE_DEVICE_NAME = "Q150DewController";
 
-static NimBLEUUID SVC_UUID   ("ab120000-0000-0000-0000-000000000001");
-static NimBLEUUID STATUS_UUID("ab120000-0000-0000-0000-000000000002");
-static NimBLEUUID CONFIG_UUID("ab120000-0000-0000-0000-000000000003");
-static NimBLEUUID INFO_UUID  ("ab120000-0000-0000-0000-000000000004");
-static NimBLEUUID CMD_UUID   ("ab120000-0000-0000-0000-000000000005");
+#define SVC_UUID    "ab120000-0000-0000-0000-000000000001"
+#define STATUS_UUID "ab120000-0000-0000-0000-000000000002"
+#define CONFIG_UUID "ab120000-0000-0000-0000-00000000C003"
+#define INFO_UUID   "ab120000-0000-0000-0000-000000000004"
+#define CMD_UUID    "ab120000-0000-0000-0000-000000000005"
 
-static NimBLECharacteristic* g_statusChar = nullptr;
+static BLECharacteristic* g_statusChar = nullptr;
+static BLECharacteristic* g_configChar = nullptr;
+static BLECharacteristic* g_infoChar = nullptr;
+static BLECharacteristic* g_cmdChar = nullptr;
+
+// BLE pending operations (flags + buffers)
+static constexpr size_t CONFIG_BUFFER_SIZE = 512;
+static constexpr size_t CMD_BUFFER_SIZE = 64;
+
+static volatile bool g_configWritePending = false;
+static char g_configWriteBuffer[CONFIG_BUFFER_SIZE];
+static volatile bool g_cmdWritePending = false;
+static char g_cmdWriteBuffer[CMD_BUFFER_SIZE];
 
 // =====================================================================
 // ======================== BLE CALLBACKS ===============================
 // =====================================================================
-class ServerCallbacks : public NimBLEServerCallbacks {
-  void onConnect(NimBLEServer* pServer) {
-    DEBUG_PRINTLN(F("========== BLE CLIENT CONNECTED =========="));
-    DEBUG_PRINT(F("Connected clients: "));
-    DEBUG_PRINTLN(pServer->getConnectedCount());
+class ServerCallbacks : public BLEServerCallbacks {
+public:
+  void onConnect(BLEServer* pServer) {
+    DEBUG_PRINTLN(F("✅ BLE CLIENT CONNECTED"));
   }
   
-  void onDisconnect(NimBLEServer* pServer) {
-    DEBUG_PRINTLN(F("========== BLE CLIENT DISCONNECTED =========="));
-    DEBUG_PRINT(F("Remaining clients: "));
-    DEBUG_PRINTLN(pServer->getConnectedCount());
-    
-    DEBUG_PRINTLN(F("Attempting to restart advertising..."));
-    
-    // Try to restart advertising using the server method
-    if (pServer->startAdvertising()) {
-      DEBUG_PRINTLN(F("✓ Advertising restarted via pServer->startAdvertising()"));
-    } else {
-      DEBUG_PRINTLN(F("✗ pServer->startAdvertising() failed, trying NimBLEDevice method"));
-      NimBLEDevice::startAdvertising();
-      DEBUG_PRINTLN(F("✓ Advertising restarted via NimBLEDevice::startAdvertising()"));
-    }
-    
-    DEBUG_PRINTLN(F("========== READY FOR NEW CONNECTION =========="));
+  void onDisconnect(BLEServer* pServer) {
+    DEBUG_PRINTLN(F("❌ BLE disconnected — restarting advertising"));
+    BLEDevice::startAdvertising();
   }
 };
 
-class ConfigCallbacks : public NimBLECharacteristicCallbacks {
-  void onRead(NimBLECharacteristic* pCharacteristic) {
-    DEBUG_PRINTLN(F("CONFIG onRead callback triggered"));
-    String json = encodeConfigJson();
-    DEBUG_PRINT(F("CONFIG JSON: "));
-    DEBUG_PRINTLN(json);
-    pCharacteristic->setValue(json);
-    DEBUG_PRINTLN(F("CONFIG read complete"));
+class ConfigCallbacks : public BLECharacteristicCallbacks {
+  void onRead(BLECharacteristic* pCharacteristic) {
+    // Minimal - value is pre-set in loop()
   }
   
-  void onWrite(NimBLECharacteristic* pCharacteristic) {
-    DEBUG_PRINTLN(F("CONFIG onWrite callback triggered"));
-    std::string value = pCharacteristic->getValue();
-    DEBUG_PRINT(F("CONFIG received: "));
-    DEBUG_PRINTLN(value.c_str());
-    decodeConfigJson(String(value.c_str()));
-    DEBUG_PRINTLN(F("CONFIG written"));
+  void onWrite(BLECharacteristic* pCharacteristic) {
+    DEBUG_PRINTLN(F("📝 CONFIG callback triggered"));
+    // Minimal - just capture and flag (thread-safe with fixed buffer)
+    String value = pCharacteristic->getValue();
+    size_t len = min(value.length(), CONFIG_BUFFER_SIZE - 1);
+    memcpy(g_configWriteBuffer, value.c_str(), len);
+    g_configWriteBuffer[len] = '\0';
+    g_configWritePending = true;
+    DEBUG_PRINTLN(F("📝 CONFIG callback complete"));
   }
 };
+
+class CmdCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* pCharacteristic) {
+    DEBUG_PRINTLN(F("🎮 CMD callback triggered"));
+    // Minimal - just capture and flag (thread-safe with fixed buffer)
+    String value = pCharacteristic->getValue();
+    size_t len = min(value.length(), CMD_BUFFER_SIZE - 1);
+    memcpy(g_cmdWriteBuffer, value.c_str(), len);
+    g_cmdWriteBuffer[len] = '\0';
+    g_cmdWritePending = true;
+    DEBUG_PRINTLN(F("🎮 CMD callback complete"));
+  }
+};
+
+// Create static callback instances
+static ServerCallbacks serverCallbacks;
+static ConfigCallbacks configCallbacks;
+static CmdCallbacks cmdCallbacks;
 
 // ======================
 // =========================== INFO JSON ================================
@@ -178,9 +190,8 @@ static String encodeInfoJson() {
   StaticJsonDocument<192> doc;
   doc[F("device")]  = F("Q150DewController");
   doc[F("version")] = FIRMWARE_VERSION;
-  doc[F("board")]   = F("XIAO ESP32-C3");
-  doc[F("pwm")]     = F("GPIO9");
-  doc[F("source")]  = F("weather");
+  doc[F("board")]   = F("XIAO ESP32S3");
+  doc[F("pwm")]     = F("D8");
   doc[F("debug")]   = DEBUG ? F("on") : F("off");
 
   String out;
@@ -199,7 +210,7 @@ static String encodeStatusJson() {
   doc[F("spread")]  = g_spread;
   doc[F("power")]   = g_powerPct;
   doc[F("enabled")] = g_cfg.heaterEnabled;
-  doc[F("source")]  = F("weather");
+  doc[F("source")]  = g_manual_mode ? "manual" : "sensor";
 
   String out;
   serializeJson(doc, out);
@@ -212,7 +223,6 @@ static String encodeStatusJson() {
 static String encodeConfigJson() {
   StaticJsonDocument<512> doc;
   doc[F("heaterEnabled")] = g_cfg.heaterEnabled;
-  doc[F("count")] = g_cfg.count;
   
   JsonArray arr = doc.createNestedArray(F("table"));
   for (int i = 0; i < g_cfg.count; i++) {
@@ -220,11 +230,6 @@ static String encodeConfigJson() {
     entry[F("spread")] = g_cfg.table[i].spreadC;
     entry[F("power")] = g_cfg.table[i].powerPct;
   }
-  
-  JsonObject wifi = doc.createNestedObject(F("wifi"));
-  wifi[F("ssid")] = g_cfg.wifiSSID;
-  wifi[F("configured")] = !g_cfg.wifiPass.isEmpty();
-  // Never send password back
   
   String out;
   serializeJson(doc, out);
@@ -241,7 +246,14 @@ static void decodeConfigJson(const String& json) {
   
   // Heater enabled
   if (doc.containsKey(F("heaterEnabled"))) {
-    g_cfg.heaterEnabled = doc[F("heaterEnabled")];
+    bool newState = doc[F("heaterEnabled")];
+    if (newState != g_cfg.heaterEnabled) {
+      DEBUG_PRINT(F("🔥 Heater state changed: "));
+      DEBUG_PRINT(g_cfg.heaterEnabled ? F("ON") : F("OFF"));
+      DEBUG_PRINT(F(" -> "));
+      DEBUG_PRINTLN(newState ? F("ON") : F("OFF"));
+    }
+    g_cfg.heaterEnabled = newState;
   }
   
   // Table
@@ -255,20 +267,28 @@ static void decodeConfigJson(const String& json) {
     }
     sortTableDescending(g_cfg);
   }
-  
-  // Wi-Fi
-  if (doc.containsKey(F("wifi"))) {
-    JsonObject wifi = doc[F("wifi")];
-    if (wifi.containsKey(F("ssid"))) {
-      g_cfg.wifiSSID = wifi[F("ssid")].as<String>();
-    }
-    if (wifi.containsKey(F("pass"))) {
-      g_cfg.wifiPass = wifi[F("pass")].as<String>();
-    }
-  }
-  
+
   saveConfig();
   DEBUG_PRINTLN(F("CONFIG updated"));
+}
+
+// =====================================================================
+// =============== Connection Monitor ==================================
+// =====================================================================
+static void bleWatchdog() {
+  static bool wasConnected = false;
+
+  BLEServer* s = BLEDevice::getServer();
+  if (!s) return;
+
+  bool connected = s->getConnectedCount() > 0;
+
+  if (wasConnected && !connected) {
+    DEBUG_PRINTLN(F("BLE disconnected (watchdog) — restart advertising"));
+    BLEDevice::startAdvertising();
+  }
+
+  wasConnected = connected;
 }
 
 // =====================================================================
@@ -278,6 +298,10 @@ static void pwmWritePercent(uint8_t pct) {
   pct = constrain(pct, 0, 100);
   int duty = (pct * PWM_MAX) / 100;
   ledcWrite(HEATER_PWM_PIN, duty);
+  // DEBUG_PRINT(F("PWM: "));
+  // DEBUG_PRINT(pct);
+  // DEBUG_PRINT(F("% duty="));
+  // DEBUG_PRINTLN(duty);
 }
 
 static void sortTableDescending(Config& cfg) {
@@ -304,39 +328,75 @@ static uint8_t powerFromSpread(const Config& cfg, float spreadC) {
 }
 
 // =====================================================================
-// ======================= WEATHER FETCH ================================
+// =================== BLE PENDING OPERATION HANDLERS ===================
 // =====================================================================
-static bool fetchOutdoorWeather(float* outT, float* outRH) {
-  HTTPClient http;
-  http.begin(WEATHER_API_URL);
+static void processPendingConfigWrite() {
+  if (!g_configWritePending) return;
+  
+  DEBUG_PRINTLN(F("Processing CONFIG write..."));
+  DEBUG_PRINT(F("CONFIG received: "));
+  DEBUG_PRINTLN(g_configWriteBuffer);
+  
+  decodeConfigJson(g_configWriteBuffer);
+  
+  DEBUG_PRINTLN(F("CONFIG written"));
+  g_configWritePending = false;
+}
 
-  int code = http.GET();
-  if (code != 200) {
-    // DEBUG_PRINTLN(F("Weather fetch failed"));  // Commented out to reduce log spam
-    http.end();
-    return false;
+static void processPendingCmdWrite() {
+  if (!g_cmdWritePending) return;
+  
+  String cmd = g_cmdWriteBuffer;
+  DEBUG_PRINT(F("CMD received: "));
+  DEBUG_PRINTLN(cmd);
+  
+  // Parse command: "power:XX"
+  if (cmd.startsWith("power:")) {
+    int power = cmd.substring(6).toInt();
+    if (power >= 0 && power <= 100) {
+      g_manual_mode = true;
+      g_manual_power = power;
+      g_powerPct = power;
+      pwmWritePercent(power);
+      DEBUG_PRINTLN("Manual power: " + String(power) + "%");
+    }
   }
-
-  StaticJsonDocument<1024> doc;
-  auto err = deserializeJson(doc, http.getString());
-  http.end();
-  if (err) {
-    // DEBUG_PRINTLN(F("Weather JSON parse error"));  // Commented out to reduce log spam
-    return false;
+  // "auto" command to return to automatic mode
+  else if (cmd == "auto") {
+    g_manual_mode = false;
+    DEBUG_PRINTLN(F("Returning to automatic mode"));
   }
+  
+  g_cmdWritePending = false;
+}
 
-  JsonObject o = doc["observations"][0];
-  JsonObject m = o["metric"];
-
-  *outT = m["temp"] | NAN;
-  *outRH = o["humidity"] | NAN;
-
-  if (isnan(*outT) || isnan(*outRH)) {
-    // DEBUG_PRINTLN(F("Weather invalid"));  // Commented out to reduce log spam
-    return false;
+// =====================================================================
+// ======================= SENSOR READ ==================================
+// =====================================================================
+static bool readSensor(float* outT, float* outRH) {
+  static bool hasLoggedDummy = false;
+  
+  // TODO: Uncomment when SHT45 arrives and is installed
+  /*
+  sensors_event_t humidity, temp;
+  if (sht4.getEvent(&humidity, &temp)) {
+    *outT = temp.temperature;
+    *outRH = humidity.relative_humidity;
+    if (!isnan(*outT) && !isnan(*outRH)) {
+      DEBUG_PRINTLN(F("✅ SHT45 sensor data"));
+      return true;
+    }
   }
-
-  // DEBUG_PRINTLN(F("Weather OK"));  // Commented out to reduce log spam
+  DEBUG_PRINTLN(F("❌ SHT45 sensor read failed"));
+  */
+  
+  // Dummy values for testing - log once
+  if (!hasLoggedDummy) {
+    DEBUG_PRINTLN(F("⚠️ Using dummy sensor values (SHT45 not installed)"));
+    hasLoggedDummy = true;
+  }
+  *outT = 20.0f;
+  *outRH = 50.0f;
   return true;
 }
 
@@ -353,8 +413,6 @@ static void saveConfig() {
     g_prefs.putUChar(("pw" + String(i)).c_str(), g_cfg.table[i].powerPct);
   }
 
-  g_prefs.putString("ssid", g_cfg.wifiSSID);
-  g_prefs.putString("pass", g_cfg.wifiPass);
   g_prefs.end();
 
   DEBUG_PRINTLN(F("Config saved"));
@@ -373,8 +431,6 @@ static void loadConfig() {
       g_prefs.getUChar(("pw" + String(i)).c_str(), g_cfg.table[i].powerPct);
   }
 
-  g_cfg.wifiSSID = g_prefs.getString("ssid", g_cfg.wifiSSID);
-  g_cfg.wifiPass = g_prefs.getString("pass", g_cfg.wifiPass);
   g_prefs.end();
 
   sortTableDescending(g_cfg);
@@ -390,63 +446,77 @@ static void setupPWM() {
   pwmWritePercent(0);
 }
 
-static void setupWiFiForWeather() {
-  if (g_cfg.wifiSSID.isEmpty()) return;
-
-  DEBUG_PRINT(F("WiFi connecting: "));
-  DEBUG_PRINTLN(g_cfg.wifiSSID);
-
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);
-  WiFi.begin(g_cfg.wifiSSID.c_str(), g_cfg.wifiPass.c_str());
-
-  // Wait up to 10 seconds for connection
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-    delay(500);
-    attempts++;
+static void setupSensor() {
+  // SHT45 sensor not yet arrived - skip initialization
+  DEBUG_PRINTLN(F("SHT45 not installed (on order)"));
+  
+  // TODO: Uncomment when SHT45 sensor arrives
+  /*
+  Wire.begin(I2C_SDA, I2C_SCL);
+  if (!sht4.begin()) {
+    DEBUG_PRINTLN(F("SHT45 not found!"));
+    return;
   }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    DEBUG_PRINT(F("WiFi connected: "));
-    DEBUG_PRINTLN(WiFi.localIP());
-  } else {
-    DEBUG_PRINTLN(F("WiFi connection failed"));
-  }
+  
+  sht4.setPrecision(SHT4X_HIGH_PRECISION);
+  sht4.setHeater(SHT4X_NO_HEATER);
+  DEBUG_PRINTLN(F("SHT45 ready"));
+  */
 }
 
 static void setupBLE() {
   DEBUG_PRINTLN(F("BLE start"));
 
-  NimBLEDevice::init(BLE_DEVICE_NAME);
+  BLEDevice::init(BLE_DEVICE_NAME);
 
-  NimBLEServer* server = NimBLEDevice::createServer();
-  server->setCallbacks(new ServerCallbacks());
+  BLEServer* server = BLEDevice::createServer();
+  server->setCallbacks(&serverCallbacks);
   
-  NimBLEService* svc = server->createService(SVC_UUID);
+  BLEService* svc = server->createService(SVC_UUID);
 
   g_statusChar = svc->createCharacteristic(
-    STATUS_UUID, NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::NOTIFY);
+    STATUS_UUID, 
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+  g_statusChar->addDescriptor(new BLE2902());
 
-  auto configChar = svc->createCharacteristic(CONFIG_UUID,
-    NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::WRITE);
-  configChar->setCallbacks(new ConfigCallbacks());
+  g_configChar = svc->createCharacteristic(
+    CONFIG_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE);
+  g_configChar->setCallbacks(&configCallbacks);
   String initialConfig = encodeConfigJson();
-  configChar->setValue(initialConfig);  // Set initial value
+  g_configChar->setValue(initialConfig.c_str());
   DEBUG_PRINT(F("CONFIG initial value set: "));
   DEBUG_PRINTLN(initialConfig);
 
-  auto infoChar = svc->createCharacteristic(
-    INFO_UUID, NIMBLE_PROPERTY::READ);
-  infoChar->setValue(encodeInfoJson());
+  g_infoChar = svc->createCharacteristic(
+    INFO_UUID,
+    BLECharacteristic::PROPERTY_READ);
+  String initialInfo = encodeInfoJson();
+  g_infoChar->setValue(initialInfo.c_str());
+  DEBUG_PRINT(F("INFO initial value set: "));
+  DEBUG_PRINTLN(initialInfo);
 
-  svc->createCharacteristic(CMD_UUID, NIMBLE_PROPERTY::WRITE);
+  g_cmdChar = svc->createCharacteristic(
+    CMD_UUID, 
+    BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+  g_cmdChar->setCallbacks(&cmdCallbacks);
+  DEBUG_PRINTLN(F("CMD characteristic created with callbacks"));
 
   svc->start();
 
-  NimBLEAdvertising* adv = NimBLEDevice::getAdvertising();
+  BLEAdvertising* adv = BLEDevice::getAdvertising();
   adv->addServiceUUID(SVC_UUID);
-  adv->start();
+  adv->setScanResponse(true);
+  adv->setMinPreferred(0x06);
+  adv->setMaxPreferred(0x12);
+  
+  // Create advertising data with device name
+  BLEAdvertisementData advertisementData;
+  advertisementData.setName(BLE_DEVICE_NAME);
+  advertisementData.setCompleteServices(BLEUUID(SVC_UUID));
+  adv->setAdvertisementData(advertisementData);
+  
+  BLEDevice::startAdvertising();
 
   DEBUG_PRINTLN(F("BLE ready"));
 }
@@ -457,19 +527,22 @@ static void setupBLE() {
 static void updateReadingsAndControl() {
   float T, H;
 
-  if (WiFi.status() != WL_CONNECTED) {
-    DEBUG_PRINTLN(F("No WiFi"));
+  if (!readSensor(&T, &H)) {
+    DEBUG_PRINTLN(F("Sensor read failed"));
     return;
   }
-
-  if (!fetchOutdoorWeather(&T, &H)) return;
 
   g_T = T;
   g_RH = H;
   g_Td = dewPointC(g_T, g_RH);
   g_spread = isnan(g_Td) ? NAN : (g_T - g_Td);
 
-  g_powerPct = powerFromSpread(g_cfg, g_spread);
+  // Use manual power if in manual mode, otherwise calculate from spread
+  if (g_manual_mode) {
+    g_powerPct = g_manual_power;
+  } else {
+    g_powerPct = powerFromSpread(g_cfg, g_spread);
+  }
   pwmWritePercent(g_powerPct);
 
   // DEBUG_PRINT(F("Sp="));  // Commented out to reduce log spam
@@ -480,20 +553,41 @@ static void updateReadingsAndControl() {
 
 void setup() {
   DEBUG_BEGIN(115200);
+  
+  #if DEBUG
+    // Wait for Serial Monitor to connect (up to 5 seconds)
+    unsigned long start = millis();
+    while (!Serial && (millis() - start < 5000)) {
+      delay(10);
+    }
+    delay(800);  // Extra settle time
+  #endif
+
+  DEBUG_PRINTLN();
+  DEBUG_PRINTLN(F("========================================"));
   DEBUG_PRINTLN(F("Q150 Dew Controller"));
   DEBUG_PRINT(F("FW "));
   DEBUG_PRINTLN(FIRMWARE_VERSION);
+  DEBUG_PRINTLN(F("========================================"));
 
   loadConfig();
   setupPWM();
-  setupWiFiForWeather();
+  setupSensor();
   setupBLE();
 }
 
 void loop() {
   static unsigned long lastRead = 0;
   static unsigned long lastNotify = 0;
+  static unsigned long lastConfigUpdate = 0;
   unsigned long now = millis();
+
+  // Process pending BLE operations FIRST (minimal latency)
+  processPendingConfigWrite();
+  processPendingCmdWrite();
+
+  // check BLE connection
+  bleWatchdog();
 
   if (now - lastRead >= 5000) {
     lastRead = now;
@@ -502,8 +596,16 @@ void loop() {
 
   if (now - lastNotify >= 2000 && g_statusChar) {
     lastNotify = now;
-    g_statusChar->setValue(encodeStatusJson());
+    String status = encodeStatusJson();
+    g_statusChar->setValue(status.c_str());
     g_statusChar->notify();
+  }
+
+  // Update CONFIG characteristic value periodically (for reads)
+  if (now - lastConfigUpdate >= 5000 && g_configChar) {
+    lastConfigUpdate = now;
+    String config = encodeConfigJson();
+    g_configChar->setValue(config.c_str());
   }
 
   delay(10);
