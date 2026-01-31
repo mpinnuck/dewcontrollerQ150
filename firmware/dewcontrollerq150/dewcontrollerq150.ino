@@ -46,6 +46,10 @@ static constexpr int PWM_FREQ_HZ   = 1000;
 static constexpr int PWM_RES_BITS  = 10;
 static constexpr int PWM_MAX       = (1 << PWM_RES_BITS) - 1;
 
+// Timing intervals (milliseconds)
+static constexpr unsigned long SENSOR_READ_INTERVAL_MS = 5000;   // 5 seconds
+static constexpr unsigned long STATUS_NOTIFY_INTERVAL_MS = 2000; // 2 seconds
+
 // =====================================================================
 // =========================== SENSOR ===================================
 // =====================================================================
@@ -73,7 +77,8 @@ struct SpreadPowerEntry {
 };
 
 struct Config {
-  bool heaterEnabled = true;
+  uint8_t cfgVersion = 1;
+  bool heaterEnabled = false;
   uint8_t count = 3;
 
   SpreadPowerEntry table[MAX_TABLE] = {
@@ -119,6 +124,7 @@ static const char* BLE_DEVICE_NAME = "Q150DewController";
 #define INFO_UUID   "ab120000-0000-0000-0000-000000000004"
 #define CMD_UUID    "ab120000-0000-0000-0000-000000000005"
 
+static BLEServer* g_server = nullptr;
 static BLECharacteristic* g_statusChar = nullptr;
 static BLECharacteristic* g_configChar = nullptr;
 static BLECharacteristic* g_infoChar = nullptr;
@@ -144,7 +150,6 @@ public:
   
   void onDisconnect(BLEServer* pServer) {
     DEBUG_PRINTLN(F("❌ BLE disconnected — restarting advertising"));
-    BLEDevice::startAdvertising();
   }
 };
 
@@ -222,6 +227,7 @@ static String encodeStatusJson() {
 // =====================================================================
 static String encodeConfigJson() {
   StaticJsonDocument<512> doc;
+  doc[F("cfgVersion")] = g_cfg.cfgVersion;
   doc[F("heaterEnabled")] = g_cfg.heaterEnabled;
   
   JsonArray arr = doc.createNestedArray(F("table"));
@@ -242,6 +248,11 @@ static void decodeConfigJson(const String& json) {
   if (err) {
     DEBUG_PRINTLN(F("CONFIG JSON parse error"));
     return;
+  }
+  
+  // Config version (optional, defaults to 1)
+  if (doc.containsKey(F("cfgVersion"))) {
+    g_cfg.cfgVersion = doc[F("cfgVersion")] | 1;
   }
   
   // Heater enabled
@@ -278,10 +289,9 @@ static void decodeConfigJson(const String& json) {
 static void bleWatchdog() {
   static bool wasConnected = false;
 
-  BLEServer* s = BLEDevice::getServer();
-  if (!s) return;
+  if (!g_server) return;
 
-  bool connected = s->getConnectedCount() > 0;
+  bool connected = g_server->getConnectedCount() > 0;
 
   if (wasConnected && !connected) {
     DEBUG_PRINTLN(F("BLE disconnected (watchdog) — restart advertising"));
@@ -405,6 +415,7 @@ static bool readSensor(float* outT, float* outRH) {
 // =====================================================================
 static void saveConfig() {
   g_prefs.begin("q150dew", false);
+  g_prefs.putUChar("cfgVer", g_cfg.cfgVersion);
   g_prefs.putBool("heaterEn", g_cfg.heaterEnabled);
   g_prefs.putUChar("count", g_cfg.count);
 
@@ -421,7 +432,8 @@ static void saveConfig() {
 static void loadConfig() {
   g_prefs.begin("q150dew", true);
 
-  g_cfg.heaterEnabled = g_prefs.getBool("heaterEn", true);
+  g_cfg.cfgVersion = g_prefs.getUChar("cfgVer", 1);
+  g_cfg.heaterEnabled = g_prefs.getBool("heaterEn", false);
   g_cfg.count = constrain(g_prefs.getUChar("count", g_cfg.count), 1, MAX_TABLE);
 
   for (int i = 0; i < MAX_TABLE; i++) {
@@ -465,24 +477,28 @@ static void setupSensor() {
 }
 
 static void setupBLE() {
+
   DEBUG_PRINTLN(F("BLE start"));
 
   BLEDevice::init(BLE_DEVICE_NAME);
 
-  BLEServer* server = BLEDevice::createServer();
-  server->setCallbacks(&serverCallbacks);
-  
-  BLEService* svc = server->createService(SVC_UUID);
+  g_server = BLEDevice::createServer();
+  g_server->setCallbacks(&serverCallbacks);
+
+  BLEService* svc = g_server->createService(SVC_UUID);
 
   g_statusChar = svc->createCharacteristic(
-    STATUS_UUID, 
-    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+    STATUS_UUID,
+    BLECharacteristic::PROPERTY_READ |
+    BLECharacteristic::PROPERTY_NOTIFY);
   g_statusChar->addDescriptor(new BLE2902());
 
   g_configChar = svc->createCharacteristic(
     CONFIG_UUID,
-    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE);
+    BLECharacteristic::PROPERTY_READ |
+    BLECharacteristic::PROPERTY_WRITE);
   g_configChar->setCallbacks(&configCallbacks);
+
   String initialConfig = encodeConfigJson();
   g_configChar->setValue(initialConfig.c_str());
   DEBUG_PRINT(F("CONFIG initial value set: "));
@@ -491,31 +507,30 @@ static void setupBLE() {
   g_infoChar = svc->createCharacteristic(
     INFO_UUID,
     BLECharacteristic::PROPERTY_READ);
+
   String initialInfo = encodeInfoJson();
   g_infoChar->setValue(initialInfo.c_str());
   DEBUG_PRINT(F("INFO initial value set: "));
   DEBUG_PRINTLN(initialInfo);
 
   g_cmdChar = svc->createCharacteristic(
-    CMD_UUID, 
-    BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+    CMD_UUID,
+    BLECharacteristic::PROPERTY_WRITE |
+    BLECharacteristic::PROPERTY_WRITE_NR);
   g_cmdChar->setCallbacks(&cmdCallbacks);
   DEBUG_PRINTLN(F("CMD characteristic created with callbacks"));
 
   svc->start();
 
   BLEAdvertising* adv = BLEDevice::getAdvertising();
-  adv->addServiceUUID(SVC_UUID);
-  adv->setScanResponse(true);
-  adv->setMinPreferred(0x06);
-  adv->setMaxPreferred(0x12);
-  
-  // Create advertising data with device name
-  BLEAdvertisementData advertisementData;
-  advertisementData.setName(BLE_DEVICE_NAME);
-  advertisementData.setCompleteServices(BLEUUID(SVC_UUID));
-  adv->setAdvertisementData(advertisementData);
-  
+
+  BLEAdvertisementData advData;
+  advData.setName(BLE_DEVICE_NAME);
+  advData.setCompleteServices(BLEUUID(SVC_UUID));
+
+  adv->setAdvertisementData(advData);
+  adv->setScanResponse(false);
+
   BLEDevice::startAdvertising();
 
   DEBUG_PRINTLN(F("BLE ready"));
@@ -589,23 +604,16 @@ void loop() {
   // check BLE connection
   bleWatchdog();
 
-  if (now - lastRead >= 5000) {
+  if (now - lastRead >= SENSOR_READ_INTERVAL_MS) {
     lastRead = now;
     updateReadingsAndControl();
   }
 
-  if (now - lastNotify >= 2000 && g_statusChar) {
+  if (now - lastNotify >= STATUS_NOTIFY_INTERVAL_MS && g_statusChar) {
     lastNotify = now;
     String status = encodeStatusJson();
     g_statusChar->setValue(status.c_str());
     g_statusChar->notify();
-  }
-
-  // Update CONFIG characteristic value periodically (for reads)
-  if (now - lastConfigUpdate >= 5000 && g_configChar) {
-    lastConfigUpdate = now;
-    String config = encodeConfigJson();
-    g_configChar->setValue(config.c_str());
   }
 
   delay(10);

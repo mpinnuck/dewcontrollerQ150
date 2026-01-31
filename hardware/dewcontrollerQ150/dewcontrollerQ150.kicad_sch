@@ -2300,12 +2300,6 @@
 		(uuid "ab3ce26f-5834-4e05-8853-914bb5106300")
 	)
 	(junction
-		(at 209.55 93.98)
-		(diameter 0)
-		(color 0 0 0 0)
-		(uuid "bd2d0685-0790-4c22-bf12-a99618309b98")
-	)
-	(junction
 		(at 100.33 90.17)
 		(diameter 0)
 		(color 0 0 0 0)
@@ -2552,16 +2546,6 @@
 			(type default)
 		)
 		(uuid "5fa41a67-29b6-408c-923b-32069d44151c")
-	)
-	(wire
-		(pts
-			(xy 209.55 93.98) (xy 204.47 93.98)
-		)
-		(stroke
-			(width 0)
-			(type default)
-		)
-		(uuid "67ce53c2-414e-4236-b488-63c15256f91f")
 	)
 	(wire
 		(pts
@@ -2943,16 +2927,6 @@
 		)
 		(uuid "d6591cc2-4a2f-4f4d-8b05-c675d5246811")
 	)
-	(label "+Heater"
-		(at 209.55 93.98 180)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify right bottom)
-		)
-		(uuid "e6a24fc3-8f7c-417a-ab34-49731bf13ecf")
-	)
 	(symbol
 		(lib_id "Transistor_FET:Q_NMOS_GDS")
 		(at 207.01 111.76 0)
@@ -2981,7 +2955,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "Package_TO_SOT_THT:TO-218-3_Vertical"
 			(at 212.09 109.22 0)
 			(effects
 				(font
@@ -3053,7 +3027,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "Capacitor_THT:C_Disc_D5.1mm_W3.2mm_P5.00mm"
 			(at 182.5752 100.33 0)
 			(effects
 				(font
@@ -3122,7 +3096,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "Capacitor_THT:CP_Radial_D10.0mm_P5.00mm"
 			(at 98.7552 90.17 0)
 			(effects
 				(font
@@ -3192,7 +3166,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal"
 			(at 112.522 66.04 90)
 			(effects
 				(font
@@ -3261,7 +3235,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "Capacitor_THT:C_Disc_D5.1mm_W3.2mm_P5.00mm"
 			(at 105.1052 90.17 0)
 			(effects
 				(font
@@ -3331,7 +3305,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "Connector_JST:JST_XH_B2B-XH-A_1x02_P2.50mm_Vertical"
 			(at 87.63 73.66 0)
 			(effects
 				(font
@@ -3476,7 +3450,7 @@
 				)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal"
 			(at 184.15 113.538 90)
 			(effects
 				(font
@@ -3545,7 +3519,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "Connector_JST:JST_XH_B2B-XH-A_1x02_P2.50mm_Vertical"
 			(at 214.63 93.98 0)
 			(effects
 				(font
@@ -3783,7 +3757,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "Capacitor_THT:C_Disc_D5.1mm_W3.2mm_P5.00mm"
 			(at 192.7352 100.33 0)
 			(effects
 				(font
@@ -3853,7 +3827,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "Resistor_THT:R_Axial_DIN0207_L6.3mm_D2.5mm_P7.62mm_Horizontal"
 			(at 191.262 120.65 90)
 			(effects
 				(font
@@ -3989,7 +3963,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" ""
+		(property "Footprint" "Connector_JST:JST_XH_B4B-XH-A_1x04_P2.50mm_Vertical"
 			(at 93.98 118.11 0)
 			(effects
 				(font

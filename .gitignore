@@ -1,2 +1,3 @@
-hardware/dewcontrollerQ150/~dewcontrollerQ150.kicad_sch.lck
-hardware/dewcontrollerQ150/dewcontrollerQ150-backups/dewcontrollerQ150-2026-01-29_174508.zip
+*.lck
+fp-info-cache
+hardware/dewcontrollerQ150/dewcontrollerQ150-backups/

@@ -86,13 +86,25 @@ def log(msg: str) -> None:
         pass
 
 
-def set_connected_ui(is_up: bool, detail: str = "") -> None:
+def clear_log() -> None:
+    """Clear the log text widget."""
+    if log_text is None:
+        return
+    try:
+        log_text.configure(state=tk.NORMAL)
+        log_text.delete("1.0", tk.END)
+        log_text.configure(state=tk.DISABLED)
+    except tk.TclError:
+        pass
+
+
+def set_connected_ui(is_up: bool) -> None:
     if conn_label is None:
         return
     if is_up:
-        conn_label.config(text=f"✅ Connected {detail}".strip(), foreground="green")
+        conn_label.config(text="✅ Connected", foreground="green")
     else:
-        conn_label.config(text=f"❌ Disconnected {detail}".strip(), foreground="red")
+        conn_label.config(text="❌ Disconnected", foreground="red")
 
 
 # ======================================================
@@ -159,12 +171,12 @@ async def find_device_by_name(timeout: float = 6.0):
     log(f"🔍 Scanning for BLE device '{DEVICE_NAME}' ({timeout:.0f}s)...")
     
     # Try with service UUID filter first
-    devices = await BleakScanner.discover(timeout=timeout, service_uuids=[SERVICE_UUID])
+    # devices = await BleakScanner.discover(timeout=timeout, service_uuids=[SERVICE_UUID])
     
     # If no devices found with service filter, try without filter
-    if not devices:
-        log(f"📡 No devices found with service filter, scanning all devices...")
-        devices = await BleakScanner.discover(timeout=timeout)
+    #if not devices:
+    #    log(f"📡 No devices found with service filter, scanning all devices...")
+    devices = await BleakScanner.discover(timeout=timeout)
     
     # Log all discovered devices
     log(f"📡 Found {len(devices)} BLE device(s):")
@@ -191,7 +203,7 @@ def disconnect_callback(_client: BleakClient):
     global connected, reconnect_task, client
     connected = False
     client = None  # Clear the client reference
-    set_connected_ui(False, "(disconnected)")
+    set_connected_ui(False)
     log("⚠️ BLE disconnected")
     
     # Trigger reconnection attempt
@@ -227,7 +239,7 @@ async def connect_to_device(device):
         
         connected = True
         last_device = device  # Store for reconnection
-        set_connected_ui(True, f"({device.address})")
+        set_connected_ui(True)
         log("✅ Connected")
 
         # INFO
@@ -250,16 +262,26 @@ async def connect_to_device(device):
 
 
 async def connect_auto():
-    global client, connected
+    global client, connected, reconnect_task
 
     if connected and client:
         return True
 
     d = await find_device_by_name()
     if not d:
+        # Start reconnect loop if initial connection fails
+        if reconnect_enabled and not stop_event.is_set():
+            if reconnect_task is None or reconnect_task.done():
+                reconnect_task = asyncio.create_task(reconnect_loop())
         return False
 
-    return await connect_to_device(d)
+    success = await connect_to_device(d)
+    if not success:
+        # Start reconnect loop if connection fails
+        if reconnect_enabled and not stop_event.is_set():
+            if reconnect_task is None or reconnect_task.done():
+                reconnect_task = asyncio.create_task(reconnect_loop())
+    return success
 
 
 async def reconnect_loop():
@@ -579,7 +601,6 @@ async def set_manual_power():
         # Send command via CMD characteristic (format: "power:XX")
         cmd = f"power:{power}"
         await client.write_gatt_char(CMD_UUID, cmd.encode("utf-8"), response=False)
-        log(f"🎚️ Manual power: {power}%")
     except Exception as e:
         log(f"❌ Failed to set manual power: {e}")
 
@@ -626,7 +647,7 @@ def build_gui():
     # Left column: Status + Info
     left = ttk.Frame(top)
     left.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
-    left.grid_rowconfigure(2, weight=1)
+    left.grid_rowconfigure(1, weight=1)
 
     status_frame = ttk.LabelFrame(left, text="Live Status")
     status_frame.grid(row=0, column=0, sticky="ew")
@@ -647,7 +668,6 @@ def build_gui():
 
     info_frame = ttk.LabelFrame(left, text="Device Info (INFO)")
     info_frame.grid(row=1, column=0, sticky="nsew", pady=(8,0))
-    info_frame.grid_rowconfigure(0, weight=1)
     info_frame.grid_columnconfigure(0, weight=1)
     info_frame.grid_columnconfigure(1, weight=1)
 
@@ -658,21 +678,9 @@ def build_gui():
     ttk.Button(info_frame, text="Read INFO",
                command=lambda: asyncio.create_task(read_info())).grid(row=1, column=0, columnspan=2, sticky="ew", padx=6, pady=(0,6))
 
-    # Right column: Config editor
-    right = ttk.Frame(top)
-    right.grid(row=1, column=1, sticky="nsew")
-    right.grid_rowconfigure(2, weight=1)
-
-    cfg_frame = ttk.LabelFrame(right, text="Configuration (CONFIG)")
-    cfg_frame.grid(row=0, column=0, sticky="nsew")
-    cfg_frame.grid_columnconfigure(0, weight=1)
-
-    heater_enabled_var = tk.BooleanVar(value=False)
-    ttk.Checkbutton(cfg_frame, text="Heater Enabled", variable=heater_enabled_var).grid(row=0, column=0, sticky="w", padx=6, pady=6)
-
     # Heater toggle button (using tk.Label styled as button for reliable colors on macOS)
-    heater_frame = tk.Frame(info_frame, bg="red", relief=tk.RAISED, borderwidth=3)
-    heater_frame.grid(row=2, column=0, columnspan=2, sticky="ew", padx=6, pady=6)
+    heater_frame = tk.Frame(left, bg="red", relief=tk.RAISED, borderwidth=3)
+    heater_frame.grid(row=2, column=0, sticky="ew", pady=(8,0))
     heater_button = tk.Label(
         heater_frame,
         text="Heater OFF",
@@ -691,10 +699,10 @@ def build_gui():
     # Right column: Config editor
     right = ttk.Frame(top)
     right.grid(row=1, column=1, sticky="nsew")
-    right.grid_rowconfigure(2, weight=1)
+    right.grid_rowconfigure(1, weight=1)
 
     cfg_frame = ttk.LabelFrame(right, text="Configuration (CONFIG)")
-    cfg_frame.grid(row=0, column=0, sticky="nsew")
+    cfg_frame.grid(row=0, column=0, sticky="ew")
     cfg_frame.grid_columnconfigure(0, weight=1)
 
     heater_enabled_var = tk.BooleanVar(value=False)
@@ -726,9 +734,9 @@ def build_gui():
     ttk.Button(btns, text="Write CONFIG",
                command=lambda: asyncio.create_task(write_config())).grid(row=0, column=1, sticky="ew", padx=(4,0))
 
-    # Manual heater power slider (0-100%)
-    power_slider_frame = ttk.LabelFrame(cfg_frame, text="Manual Power")
-    power_slider_frame.grid(row=3, column=0, sticky="ew", padx=6, pady=(0,6))
+    # Manual heater power slider (0-100%) - in right frame to align with heater button
+    power_slider_frame = ttk.LabelFrame(right, text="Manual Power")
+    power_slider_frame.grid(row=1, column=0, sticky="sew", pady=(8,0))
     manual_power_var = tk.IntVar(value=0)
     
     def update_power_label(v):
@@ -744,17 +752,26 @@ def build_gui():
         command=update_power_label
     )
     power_slider.pack(fill="x", padx=6, pady=6)
+    
     power_label = ttk.Label(power_slider_frame, text="0%")
-    power_label.pack(pady=(0, 6))
+    power_label.pack(pady=(0,6))
 
     # Log at bottom
-    log_frame = ttk.LabelFrame(root, text="Log")
+    log_frame = ttk.LabelFrame(root)
     log_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0,10))
-    log_frame.grid_rowconfigure(0, weight=1)
+    log_frame.grid_rowconfigure(1, weight=1)
     log_frame.grid_columnconfigure(0, weight=1)
 
+    # Log header with label and clear button
+    log_header = ttk.Frame(log_frame)
+    log_header.grid(row=0, column=0, sticky="ew", padx=6, pady=(6,0))
+    log_header.grid_columnconfigure(0, weight=1)
+    
+    ttk.Label(log_header, text="Log", font=('Helvetica', 10, 'bold')).pack(side=tk.LEFT)
+    ttk.Button(log_header, text="Clear Log", command=clear_log).pack(side=tk.RIGHT)
+
     log_text = tk.Text(log_frame)
-    log_text.grid(row=0, column=0, sticky="nsew", padx=6, pady=6)
+    log_text.grid(row=1, column=0, sticky="nsew", padx=6, pady=6)
     log_text.configure(state=tk.DISABLED)
 
     root.eval("tk::PlaceWindow . center")
