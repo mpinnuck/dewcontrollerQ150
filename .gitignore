@@ -1,3 +1,5 @@
 *.lck
+*.FCBak
 fp-info-cache
 hardware/dewcontrollerQ150/dewcontrollerQ150-backups/
+hardware/dewcontrollerQ150/pcbfiles/
