@@ -9,8 +9,8 @@
  Firmware Version: 1.0
 ************************************************************************/
 
-#define FIRMWARE_VERSION "1.0"
-#define DEBUG 1   // <<<<<<<<<< SET TO 0 FOR RELEASE BUILD
+#define FIRMWARE_VERSION "1.1"
+#define DEBUG 0   // <<<<<<<<<< SET TO 0 FOR RELEASE BUILD
 
 // =====================================================================
 // ========================== DEBUG MACROS ===============================
@@ -384,10 +384,6 @@ static void processPendingCmdWrite() {
 // ======================= SENSOR READ ==================================
 // =====================================================================
 static bool readSensor(float* outT, float* outRH) {
-  static bool hasLoggedDummy = false;
-  
-  // TODO: Uncomment when SHT45 arrives and is installed
-  /*
   sensors_event_t humidity, temp;
   if (sht4.getEvent(&humidity, &temp)) {
     *outT = temp.temperature;
@@ -398,16 +394,7 @@ static bool readSensor(float* outT, float* outRH) {
     }
   }
   DEBUG_PRINTLN(F("❌ SHT45 sensor read failed"));
-  */
-  
-  // Dummy values for testing - log once
-  if (!hasLoggedDummy) {
-    DEBUG_PRINTLN(F("⚠️ Using dummy sensor values (SHT45 not installed)"));
-    hasLoggedDummy = true;
-  }
-  *outT = 20.0f;
-  *outRH = 50.0f;
-  return true;
+  return false;
 }
 
 // =====================================================================
@@ -459,11 +446,6 @@ static void setupPWM() {
 }
 
 static void setupSensor() {
-  // SHT45 sensor not yet arrived - skip initialization
-  DEBUG_PRINTLN(F("SHT45 not installed (on order)"));
-  
-  // TODO: Uncomment when SHT45 sensor arrives
-  /*
   Wire.begin(I2C_SDA, I2C_SCL);
   if (!sht4.begin()) {
     DEBUG_PRINTLN(F("SHT45 not found!"));
@@ -473,7 +455,6 @@ static void setupSensor() {
   sht4.setPrecision(SHT4X_HIGH_PRECISION);
   sht4.setHeater(SHT4X_NO_HEATER);
   DEBUG_PRINTLN(F("SHT45 ready"));
-  */
 }
 
 static void setupBLE() {

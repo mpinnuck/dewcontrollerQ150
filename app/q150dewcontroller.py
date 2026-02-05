@@ -14,8 +14,10 @@ Management app for the Q150 Dew Controller (Seeed XIAO ESP32-C3)
 Requires:
     pip install bleak
 
+source .venv/bin/activate
 Packaging (like your FlatPanel):
-    pyinstaller --onefile Q150DewManager.py
+    cd app
+    pyinstaller q150dewcontroller.spec --noconfirm
 """
 
 import asyncio
@@ -23,6 +25,8 @@ import json
 import tkinter as tk
 from tkinter import ttk, messagebox
 from bleak import BleakClient, BleakScanner, BleakError
+import multiprocessing
+import sys
 
 
 # ======================================================
@@ -617,11 +621,18 @@ def build_gui():
 
     # Layout weights
     root.grid_rowconfigure(0, weight=0)
-    root.grid_rowconfigure(1, weight=1)
+    root.grid_rowconfigure(1, weight=0)
+    root.grid_rowconfigure(2, weight=1)
     root.grid_columnconfigure(0, weight=1)
 
+    # Title bar with version
+    title_frame = ttk.Frame(root)
+    title_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 0))
+    ttk.Label(title_frame, text="Q150 Dew Controller Manager", font=("", 14, "bold")).pack(side=tk.LEFT)
+    ttk.Label(title_frame, text="v1.0.0", font=("", 9), foreground="gray").pack(side=tk.RIGHT)
+
     top = ttk.Frame(root, padding=10)
-    top.grid(row=0, column=0, sticky="nsew")
+    top.grid(row=1, column=0, sticky="nsew")
     top.grid_columnconfigure(0, weight=1)
     top.grid_columnconfigure(1, weight=1)
     top.grid_rowconfigure(1, weight=1)
@@ -758,7 +769,7 @@ def build_gui():
 
     # Log at bottom
     log_frame = ttk.LabelFrame(root)
-    log_frame.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0,10))
+    log_frame.grid(row=2, column=0, sticky="nsew", padx=10, pady=(0,10))
     log_frame.grid_rowconfigure(1, weight=1)
     log_frame.grid_columnconfigure(0, weight=1)
 
@@ -820,5 +831,6 @@ async def main():
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     asyncio.run(main())
     
