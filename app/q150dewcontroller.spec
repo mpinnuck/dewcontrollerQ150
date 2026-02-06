@@ -1,5 +1,10 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+# Read version from source file
+import re
+with open('q150dewcontroller.py', 'r') as f:
+    version_match = re.search(r'^VERSION\s*=\s*[\'"]([^\'"]+)[\'"]', f.read(), re.MULTILINE)
+    VERSION = version_match.group(1) if version_match else '1.0.0'
 
 a = Analysis(
     ['q150dewcontroller.py'],
@@ -50,8 +55,8 @@ app = BUNDLE(
     icon=None,
     bundle_identifier='com.q150dewcontroller',
     info_plist={
-        'CFBundleShortVersionString': '1.0.0',
-        'CFBundleVersion': '1.0.0',
+        'CFBundleShortVersionString': VERSION,
+        'CFBundleVersion': VERSION,
         'NSBluetoothAlwaysUsageDescription': 'This app needs Bluetooth access to connect to and control the Q150 Dew Controller device.',
         'NSBluetoothPeripheralUsageDescription': 'This app needs Bluetooth access to connect to and control the Q150 Dew Controller device.',
     },

@@ -28,6 +28,15 @@ from bleak import BleakClient, BleakScanner, BleakError
 import multiprocessing
 import sys
 
+# Application version - single source of truth
+VERSION = "1.1.0"
+
+
+# ======================================================
+# Version
+# ======================================================
+VERSION = "1.1.0"
+
 
 # ======================================================
 # BLE UUIDs (match firmware)
@@ -166,6 +175,10 @@ def on_status_notify(_: int, data: bytes) -> None:
                 status_vars[k].set(f"{v:.2f}")
             else:
                 status_vars[k].set(str(v))
+    
+    # Update heater button appearance based on power level
+    if heater_enabled_var and heater_button:
+        set_heater_button(heater_enabled_var.get())
 
 
 # ======================================================
@@ -555,20 +568,37 @@ async def write_config():
 # GUI
 # ======================================================
 def set_heater_button(on: bool):
-    if on:
-        heater_button.config(
-            text="Heater ON",
-            bg="green",
-            fg="white"
-        )
-        heater_button.frame.config(bg="green")
-    else:
+    """Update heater button based on enabled state and current power."""
+    if heater_button is None:
+        return
+    
+    if not on:
+        # Disabled: Red
         heater_button.config(
             text="Heater OFF",
             bg="red",
             fg="white"
         )
         heater_button.frame.config(bg="red")
+    else:
+        # Enabled: Check if actively heating
+        power = latest_status.get("power", 0)
+        if isinstance(power, (int, float)) and power > 0:
+            # Actively heating: Green
+            heater_button.config(
+                text="Heater ON",
+                bg="green",
+                fg="white"
+            )
+            heater_button.frame.config(bg="green")
+        else:
+            # Enabled but not heating: Amber
+            heater_button.config(
+                text="Heater ON",
+                bg="orange",
+                fg="black"
+            )
+            heater_button.frame.config(bg="orange")
 
 
 def toggle_reconnect():
@@ -629,7 +659,7 @@ def build_gui():
     title_frame = ttk.Frame(root)
     title_frame.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 0))
     ttk.Label(title_frame, text="Q150 Dew Controller Manager", font=("", 14, "bold")).pack(side=tk.LEFT)
-    ttk.Label(title_frame, text="v1.0.0", font=("", 9), foreground="gray").pack(side=tk.RIGHT)
+    ttk.Label(title_frame, text=f"v{VERSION}", font=("", 9), foreground="gray").pack(side=tk.RIGHT)
 
     top = ttk.Frame(root, padding=10)
     top.grid(row=1, column=0, sticky="nsew")
@@ -717,11 +747,10 @@ def build_gui():
     cfg_frame.grid_columnconfigure(0, weight=1)
 
     heater_enabled_var = tk.BooleanVar(value=False)
-    ttk.Checkbutton(cfg_frame, text="Heater Enabled", variable=heater_enabled_var).grid(row=0, column=0, sticky="w", padx=6, pady=6)
 
     # Spread/Power table editor
     table_frame = ttk.LabelFrame(cfg_frame, text="Spread → Power Table (max 5)")
-    table_frame.grid(row=1, column=0, sticky="ew", padx=6, pady=(0,6))
+    table_frame.grid(row=0, column=0, sticky="ew", padx=6, pady=6)
     ttk.Label(table_frame, text="Spread (°C)").grid(row=0, column=0, padx=6, pady=4, sticky="w")
     ttk.Label(table_frame, text="Power (%)").grid(row=0, column=1, padx=6, pady=4, sticky="w")
 
@@ -736,7 +765,7 @@ def build_gui():
         e2.grid(row=i+1, column=1, padx=6, pady=2, sticky="w")
 
     btns = ttk.Frame(cfg_frame)
-    btns.grid(row=2, column=0, sticky="ew", padx=6, pady=(0,6))
+    btns.grid(row=1, column=0, sticky="ew", padx=6, pady=(0,6))
     btns.grid_columnconfigure(0, weight=1)
     btns.grid_columnconfigure(1, weight=1)
 
