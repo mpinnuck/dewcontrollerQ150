@@ -7,7 +7,7 @@
 	(title_block
 		(title "Dew Heater Controller for Q150")
 		(date "2026-01-27")
-		(rev "0.1")
+		(rev "B")
 		(company "Mark Pinnuck")
 	)
 	(lib_symbols
@@ -2955,7 +2955,7 @@
 				(justify left)
 			)
 		)
-		(property "Footprint" "Package_TO_SOT_THT:TO-218-3_Vertical"
+		(property "Footprint" "Package_TO_SOT_THT:TO-220-3_Vertical"
 			(at 212.09 109.22 0)
 			(effects
 				(font
