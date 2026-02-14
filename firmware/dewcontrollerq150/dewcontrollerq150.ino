@@ -9,7 +9,7 @@
  Firmware Version: 1.0
 ************************************************************************/
 
-#define FIRMWARE_VERSION "1.1"
+#define FIRMWARE_VERSION "1.2"
 #define DEBUG 0   // <<<<<<<<<< SET TO 0 FOR RELEASE BUILD
 
 // =====================================================================
@@ -82,11 +82,11 @@ struct Config {
   uint8_t count = 3;
 
   SpreadPowerEntry table[MAX_TABLE] = {
-    {5.0f, 15},
-    {3.0f, 30},
-    {1.0f, 50},
-    {0.0f, 0},
-    {0.0f, 0}
+    {5.0f, 8},
+    {3.0f, 15},
+    {2.0f, 22},
+    {1.0f, 30},
+    {0.5f, 40}
   };
 };
 
