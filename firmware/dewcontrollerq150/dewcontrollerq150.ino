@@ -12,8 +12,8 @@
  Firmware Version: 1.3
 ************************************************************************/
 
-#define FIRMWARE_VERSION "2.0"
-#define DEBUG 1   // <<<<<<<<<< SET TO 0 FOR RELEASE BUILD
+#define FIRMWARE_VERSION "2.1"
+#define DEBUG 0   // <<<<<<<<<< SET TO 0 FOR RELEASE BUILD
 
 // =====================================================================
 // ========================== DEBUG MACROS ===============================
@@ -690,22 +690,7 @@ void handleRoot() {
       font-size: 0.9rem;
       color: #ecf0f1;
     }
-    .connection-status {
-      display: inline-block;
-      padding: 3px 10px;
-      border-radius: 12px;
-      font-size: 0.75rem;
-      font-weight: bold;
-      margin-left: 10px;
-    }
-    .connection-status.connected {
-      background: #27ae60;
-      color: white;
-    }
-    .connection-status.disconnected {
-      background: #e74c3c;
-      color: white;
-    }
+
     .main-content {
       display: flex;
       flex: 1;
@@ -1047,27 +1032,19 @@ void handleRoot() {
   <script>
     let logPaused = false;
     let statusData = {};
-    let isConnected = false;
-    let failedAttempts = 0;
-    const MAX_FAILED_ATTEMPTS = 2;  // Show disconnected after 2 failed attempts
-
-    function updateConnectionStatus() {
-      const statusElem = document.getElementById('connection-status');
-      if (statusElem) {
-        if (isConnected) {
-          statusElem.className = 'connection-status connected';
-          statusElem.innerText = '● Online';
-        } else {
-          statusElem.className = 'connection-status disconnected';
-          statusElem.innerText = '● Offline';
-        }
-      }
-    }
+    let commandInProgress = false;
+    let powerDebounceTimer = null;
 
     function updateStatus() {
       // Create abort controller for timeout
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 1000); // 1 second timeout
+      
+      // Set timeout, but check commandInProgress before aborting
+      const timeoutId = setTimeout(() => {
+        if (!commandInProgress) {
+          controller.abort();
+        }
+      }, 1000);
       
       fetch('/api/status', { signal: controller.signal })
         .then(response => {
@@ -1079,13 +1056,6 @@ void handleRoot() {
         })
         .then(data => {
           statusData = data;
-          
-          // Mark as connected
-          if (!isConnected) {
-            isConnected = true;
-            failedAttempts = 0;
-            updateConnectionStatus();
-          }
           
           // Update status values
           document.getElementById('temp-value').innerText = data.T.toFixed(1) + ' °C';
@@ -1162,18 +1132,14 @@ void handleRoot() {
           }
         })
         .catch(error => {
+          clearTimeout(timeoutId);
           console.log('Status update failed:', error);
           
-          // Increment failed attempts
-          failedAttempts++;
-          if (failedAttempts >= MAX_FAILED_ATTEMPTS && isConnected) {
-            isConnected = false;
-            updateConnectionStatus();
-          }
-          
-          // Keep WiFi info showing last known state - don't clear it
-          // This allows distinguishing between "WiFi connected but device offline" 
-          // vs "No WiFi connection" scenarios
+          // Update WiFi info to show disconnected (fetch failed)
+          const wifiInfo = document.getElementById('wifi-info');
+          wifiInfo.innerHTML = `<span>📡 Disconnected</span> <span>-- dBm</span>`;
+          wifiInfo.style.backgroundColor = '#ffebee'; // Light red for disconnected
+          wifiInfo.style.color = '#b71c1c'; // Dark red text
           
           // Clear time display
           const timeValue = document.getElementById('time-value');
@@ -1222,27 +1188,46 @@ void handleRoot() {
     }
     
     function toggleHeater() {
+      commandInProgress = true;
       fetch('/api/toggle', { method: 'POST' })
-        .then(() => setTimeout(updateStatus, 100));
+        .then(() => {
+          commandInProgress = false;
+          setTimeout(updateStatus, 100);
+        })
+        .catch(error => {
+          commandInProgress = false;
+          console.log('Toggle heater failed:', error);
+        });
     }
     
     function setManualPower(power) {
+      commandInProgress = true;
       fetch('/api/power', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: 'power=' + power
       }).then(() => {
+        commandInProgress = false;
         // Update status after command
         setTimeout(updateStatus, 100);
       }).catch(error => {
+        commandInProgress = false;
         console.log('Power command failed:', error);
       });
     }
     
     function updatePowerValue(val) {
       document.getElementById('manual-power-label').innerText = val + '%';
-      // Send power command immediately as slider moves
-      setManualPower(val);
+      
+      // Debounce: only send power command after slider stops for 500ms
+      if (powerDebounceTimer) {
+        clearTimeout(powerDebounceTimer);
+      }
+      
+      powerDebounceTimer = setTimeout(() => {
+        setManualPower(val);
+        powerDebounceTimer = null;
+      }, 500);
     }
     
     function saveWiFiConfig() {
@@ -1255,12 +1240,14 @@ void handleRoot() {
         return;
       }
       
+      commandInProgress = true;
       fetch('/api/wifi', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: 'ssid=' + encodeURIComponent(ssid) + '&password=' + encodeURIComponent(password) + '&timezone=' + encodeURIComponent(timezone)
       })
       .then(response => {
+        commandInProgress = false;
         if (response.ok) {
           alert('WiFi credentials saved. Device will restart to connect...');
           setTimeout(() => { window.location.reload(); }, 2000);
@@ -1271,6 +1258,7 @@ void handleRoot() {
         }
       })
       .catch(error => {
+        commandInProgress = false;
         alert('Failed to save WiFi credentials');
       });
     }
@@ -1290,18 +1278,21 @@ void handleRoot() {
         table: table
       };
       
+      commandInProgress = true;
       fetch('/api/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(config)
       })
       .then(response => {
+        commandInProgress = false;
         if (response.ok) {
           alert('Spread table saved');
           setTimeout(updateStatus, 500);
         }
       })
       .catch(error => {
+        commandInProgress = false;
         alert('Failed to save spread table');
       });
     }
@@ -1333,7 +1324,7 @@ void handleRoot() {
 <body>
   <div class="container">
     <div class="header">
-      <h1>Q150 Dew Controller<span id="connection-status" class="connection-status disconnected">● Offline</span></h1>
+      <h1>Q150 Dew Controller</h1>
       <p>Firmware v)rawliteral" + String(FIRMWARE_VERSION) + R"rawliteral(</p>
     </div>
     
