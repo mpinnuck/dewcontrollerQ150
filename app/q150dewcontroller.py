@@ -14,10 +14,15 @@ Management app for the Q150 Dew Controller (Seeed XIAO ESP32-C3)
 Requires:
     pip install bleak
 
-source .venv/bin/activate
+
 Packaging (like your FlatPanel):
     cd app
+    source .venv/bin/activate
     pyinstaller q150dewcontroller.spec --noconfirm
+Windows
+    cd app
+    .\.venv\Scripts\Activate.ps1 
+    pyinstaller q150dewcontrollerw.spec --noconfirm
 """
 
 import asyncio
