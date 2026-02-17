@@ -28,14 +28,10 @@ from bleak import BleakClient, BleakScanner, BleakError
 import multiprocessing
 import sys
 
-# Application version - single source of truth
-VERSION = "1.1.0"
-
-
 # ======================================================
 # Version
 # ======================================================
-VERSION = "1.1.0"
+VERSION = "2.0.0"
 
 
 # ======================================================
@@ -81,6 +77,9 @@ status_vars = {}
 manual_power_var = None
 
 table_rows = []  # list of (spread_var, power_var)
+wifi_ssid_var = None
+wifi_password_var = None
+wifi_timezone_var = None
 
 
 # ======================================================
@@ -500,6 +499,27 @@ async def read_config():
                 spread_var.set("")
                 power_var.set("")
 
+        # WiFi Configuration
+        wifi_ssid = latest_config.get("wifiSSID", "")
+        if wifi_ssid_var:
+            wifi_ssid_var.set(wifi_ssid)
+        
+        # Password field - show asterisks if password exists, otherwise empty
+        wifi_password = latest_config.get("wifiPassword", "")
+        if wifi_password_var:
+            if wifi_password and wifi_password != "":
+                # Show asterisks matching the length of the password
+                # Entry widget show="*" will display any characters as asterisks
+                wifi_password_var.set(wifi_password)
+            else:
+                # No password set
+                wifi_password_var.set("")
+        
+        # Timezone
+        wifi_timezone = latest_config.get("timezone", "AEST-10AEDT,M10.1.0,M4.1.0/3")
+        if wifi_timezone_var:
+            wifi_timezone_var.set(wifi_timezone)
+
         log("⚙️ CONFIG read")
     except Exception as e:
         log(f"❌ CONFIG read failed: {e}")
@@ -540,6 +560,16 @@ def build_config_payload_from_ui() -> dict | None:
 
     if entries:
         payload["table"] = entries
+
+    # WiFi Configuration - only include if fields are not empty
+    if wifi_ssid_var and wifi_password_var and wifi_timezone_var:
+        ssid = wifi_ssid_var.get().strip()
+        password = wifi_password_var.get().strip()
+        timezone = wifi_timezone_var.get().strip()
+        if ssid:  # Only send if SSID is provided
+            payload["wifiSSID"] = ssid
+            payload["wifiPassword"] = password if password else ""
+            payload["timezone"] = timezone if timezone else "AEST-10AEDT,M10.1.0,M4.1.0/3"
 
     return payload
 
@@ -643,7 +673,7 @@ def build_gui():
     global root, log_text, conn_label, info_text
     global heater_enabled_var, status_vars
     global table_rows, heater_button, manual_power_var
-    global wifi_ssid_var, wifi_pass_var
+    global wifi_ssid_var, wifi_password_var, wifi_timezone_var
 
     root = tk.Tk()
     root.title("Q150 Dew Controller Manager")
@@ -764,8 +794,47 @@ def build_gui():
         e1.grid(row=i+1, column=0, padx=6, pady=2, sticky="w")
         e2.grid(row=i+1, column=1, padx=6, pady=2, sticky="w")
 
+    # WiFi Configuration section
+    wifi_frame = ttk.LabelFrame(cfg_frame, text="WiFi Configuration")
+    wifi_frame.grid(row=1, column=0, sticky="ew", padx=6, pady=(6,6))
+    wifi_frame.grid_columnconfigure(1, weight=1)
+    
+    ttk.Label(wifi_frame, text="SSID:").grid(row=0, column=0, padx=6, pady=4, sticky="w")
+    wifi_ssid_var = tk.StringVar()
+    ttk.Entry(wifi_frame, textvariable=wifi_ssid_var, width=30).grid(row=0, column=1, padx=6, pady=4, sticky="ew")
+    
+    ttk.Label(wifi_frame, text="Password:").grid(row=1, column=0, padx=6, pady=4, sticky="w")
+    wifi_password_var = tk.StringVar()
+    ttk.Entry(wifi_frame, textvariable=wifi_password_var, width=30, show="*").grid(row=1, column=1, padx=6, pady=4, sticky="ew")
+    
+    ttk.Label(wifi_frame, text="Timezone:").grid(row=2, column=0, padx=6, pady=4, sticky="w")
+    wifi_timezone_var = tk.StringVar()
+    timezone_combo = ttk.Combobox(wifi_frame, textvariable=wifi_timezone_var, width=28, state="readonly")
+    timezone_combo['values'] = (
+        "UTC0",
+        "GMT0BST,M3.5.0/1,M10.5.0",
+        "CET-1CEST,M3.5.0,M10.5.0/3",
+        "EET-2EEST,M3.5.0/3,M10.5.0/4",
+        "EST5EDT,M3.2.0,M11.1.0",
+        "CST6CDT,M3.2.0,M11.1.0",
+        "MST7MDT,M3.2.0,M11.1.0",
+        "PST8PDT,M3.2.0,M11.1.0",
+        "AKST9AKDT,M3.2.0,M11.1.0",
+        "HST10",
+        "AEST-10AEDT,M10.1.0,M4.1.0/3",
+        "ACST-9:30ACDT,M10.1.0,M4.1.0/3",
+        "AWST-8",
+        "NZST-12NZDT,M9.5.0,M4.1.0/3",
+        "JST-9",
+        "CST-8",
+        "IST-5:30",
+        "<+03>-3"
+    )
+    timezone_combo.current(10)  # Default to Australia (Sydney/Melbourne)
+    timezone_combo.grid(row=2, column=1, padx=6, pady=4, sticky="ew")
+
     btns = ttk.Frame(cfg_frame)
-    btns.grid(row=1, column=0, sticky="ew", padx=6, pady=(0,6))
+    btns.grid(row=2, column=0, sticky="ew", padx=6, pady=(0,6))
     btns.grid_columnconfigure(0, weight=1)
     btns.grid_columnconfigure(1, weight=1)
 
