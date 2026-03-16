@@ -12,7 +12,7 @@
  Firmware Version: 1.3
 ************************************************************************/
 
-#define FIRMWARE_VERSION "2.1"
+#define FIRMWARE_VERSION "3.0"
 #define DEBUG 0   // <<<<<<<<<< SET TO 0 FOR RELEASE BUILD
 
 // =====================================================================
@@ -1186,6 +1186,41 @@ void handleRoot() {
         })
         .catch(error => console.log('Log update failed:', error));
     }
+
+    function loadConfig() {
+      fetch('/api/config')
+        .then(response => {
+          if (!response.ok) {
+            throw new Error('Failed to load config');
+          }
+          return response.json();
+        })
+        .then(config => {
+          const table = Array.isArray(config.table) ? config.table : [];
+          for (let i = 0; i < 5; i++) {
+            const spreadField = document.getElementById('spread' + i);
+            const powerField = document.getElementById('power' + i);
+            const entry = table[i];
+
+            if (!spreadField || !powerField) {
+              continue;
+            }
+
+            if (entry) {
+              const spread = entry.spread !== undefined ? entry.spread : entry.spreadC;
+              const power = entry.power !== undefined ? entry.power : entry.powerPct;
+              spreadField.value = spread !== undefined ? spread : '';
+              powerField.value = power !== undefined ? power : '';
+            } else {
+              spreadField.value = '';
+              powerField.value = '';
+            }
+          }
+        })
+        .catch(error => {
+          console.log('Config load failed:', error);
+        });
+    }
     
     function toggleHeater() {
       commandInProgress = true;
@@ -1316,6 +1351,7 @@ void handleRoot() {
     setInterval(updateLog, 5000);
     
     window.onload = function() {
+      loadConfig();
       updateStatus();
       updateLog();
     };
@@ -1482,6 +1518,11 @@ void handleRoot() {
 // Add new endpoint for saving spread table
 void handleAPIConfig() {
   addLog("📥 API: /api/config");
+  if (server.method() == HTTP_GET) {
+    server.send(200, "application/json", encodeConfigJson());
+    return;
+  }
+
   if (server.method() == HTTP_POST) {
     String body = server.arg("plain");
     StaticJsonDocument<512> doc;
@@ -1494,8 +1535,8 @@ void handleAPIConfig() {
         
         for (int i = 0; i < g_cfg.count; i++) {
           JsonObject entry = table[i];
-          g_cfg.table[i].spreadC = entry["spreadC"] | 0.0f;
-          g_cfg.table[i].powerPct = entry["powerPct"] | 0;
+          g_cfg.table[i].spreadC = entry["spreadC"] | entry["spread"] | 0.0f;
+          g_cfg.table[i].powerPct = entry["powerPct"] | entry["power"] | 0;
         }
         sortTableDescending(g_cfg);
         saveConfig();
@@ -1605,6 +1646,7 @@ void setupWebServer() {
   server.on("/api/toggle", HTTP_POST, handleAPIToggle);
   server.on("/api/power", HTTP_POST, handleAPIPower);
   server.on("/api/wifi", HTTP_POST, handleAPIWiFi);
+  server.on("/api/config", HTTP_GET, handleAPIConfig);
   server.on("/api/config", HTTP_POST, handleAPIConfig);
 
   server.begin();
@@ -1661,6 +1703,7 @@ static String encodeConfigJson() {
   doc[F("heaterEnabled")] = g_cfg.heaterEnabled;
   doc[F("wifiSSID")] = g_cfg.wifiSSID;
   doc[F("wifiPassword")] = "********"; // Don't send actual password
+  doc[F("timezone")] = g_cfg.timezone;
   
   JsonArray arr = doc.createNestedArray(F("table"));
   for (int i = 0; i < g_cfg.count; i++) {
@@ -1713,6 +1756,11 @@ static void decodeConfigJson(const String& json) {
       }
     }
   }
+
+  if (doc.containsKey(F("timezone"))) {
+    const char* newTimezone = doc[F("timezone")] | g_cfg.timezone;
+    strlcpy(g_cfg.timezone, newTimezone, sizeof(g_cfg.timezone));
+  }
   
   // Table
   if (doc.containsKey(F("table"))) {
@@ -1720,8 +1768,8 @@ static void decodeConfigJson(const String& json) {
     g_cfg.count = min((int)arr.size(), MAX_TABLE);
     for (int i = 0; i < g_cfg.count; i++) {
       JsonObject entry = arr[i];
-      g_cfg.table[i].spreadC = entry[F("spread")] | 0.0f;
-      g_cfg.table[i].powerPct = entry[F("power")] | 0;
+      g_cfg.table[i].spreadC = entry[F("spread")] | entry[F("spreadC")] | 0.0f;
+      g_cfg.table[i].powerPct = entry[F("power")] | entry[F("powerPct")] | 0;
     }
     sortTableDescending(g_cfg);
   }
@@ -1774,8 +1822,8 @@ static uint8_t powerFromSpread(const Config& cfg, float spreadC) {
   if (!cfg.heaterEnabled) return 0;
   if (isnan(spreadC)) return 30;
 
-  for (int i = 0; i < cfg.count; i++) {
-    if (spreadC < cfg.table[i].spreadC)
+  for (int i = cfg.count - 1; i >= 0; i--) {
+    if (spreadC <= cfg.table[i].spreadC)
       return cfg.table[i].powerPct;
   }
   return 0;
