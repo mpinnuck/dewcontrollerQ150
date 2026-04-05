@@ -11,7 +11,7 @@
 
  ************************************************************************/
 
-#define FIRMWARE_VERSION "4.0"
+#define FIRMWARE_VERSION "4.1"
 #define DEBUG 0   // <<<<<<<<<< SET TO 0 FOR RELEASE BUILD
 
 // =====================================================================
@@ -1778,8 +1778,10 @@ static void decodeConfigJson(const String& json) {
     g_cfg.count = min((int)arr.size(), MAX_TABLE);
     for (int i = 0; i < g_cfg.count; i++) {
       JsonObject entry = arr[i];
-      g_cfg.table[i].spreadC = entry[F("spread")] | entry[F("spreadC")] | 0.0f;
-      g_cfg.table[i].powerPct = entry[F("power")] | entry[F("powerPct")] | 0;
+      float spread = entry[F("spread")] | entry[F("spreadC")] | 0.0f;
+      int power = entry[F("power")] | entry[F("powerPct")] | 0;
+      g_cfg.table[i].spreadC = constrain(spread, 0.0f, 20.0f);
+      g_cfg.table[i].powerPct = constrain(power, 0, 100);
     }
     sortTableDescending(g_cfg);
   }
