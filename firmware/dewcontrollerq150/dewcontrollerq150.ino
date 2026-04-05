@@ -11,7 +11,7 @@
 
  ************************************************************************/
 
-#define FIRMWARE_VERSION "4.1"
+#define FIRMWARE_VERSION "4.2"
 #define DEBUG 0   // <<<<<<<<<< SET TO 0 FOR RELEASE BUILD
 
 // =====================================================================
@@ -1588,6 +1588,10 @@ void handleAPIToggle() {
   addLog("📥 API: /api/toggle");
   g_cfg.heaterEnabled = !g_cfg.heaterEnabled;
   saveConfig();
+  if (!g_cfg.heaterEnabled) {
+    g_powerPct = 0;
+    pwmWritePercent(0);
+  }
   addLog("Heater toggled: " + String(g_cfg.heaterEnabled ? "ON" : "OFF"));
   server.send(200, "text/plain", "OK");
 }
@@ -1831,11 +1835,17 @@ static void sortTableDescending(Config& cfg) {
 }
 
 static uint8_t powerFromSpread(const Config& cfg, float spreadC) {
+  static bool sensorFallbackLogged = false;
+
   if (!cfg.heaterEnabled) return 0;
   if (isnan(spreadC)) {
-    addLog("⚠️ Sensor read failed — using fallback heater power 30%");
+    if (!sensorFallbackLogged) {
+      addLog("⚠️ Sensor read failed — using fallback heater power 30%");
+      sensorFallbackLogged = true;
+    }
     return 30;
   }
+  sensorFallbackLogged = false;  // reset when sensor recovers
 
   for (int i = cfg.count - 1; i >= 0; i--) {
     if (spreadC <= cfg.table[i].spreadC)
@@ -1888,12 +1898,14 @@ static void processPendingCmdWrite() {
       g_manual_power = power;
       g_powerPct = power;
       pwmWritePercent(power);
+      addLog("🎮 BLE manual power: " + String(power) + "%");
       DEBUG_PRINTLN("Manual power: " + String(power) + "%");
     }
   }
   // "auto" command to return to automatic mode
   else if (cmd == "auto") {
     g_manual_mode = false;
+    addLog("🎮 BLE: returning to automatic mode");
     DEBUG_PRINTLN(F("Returning to automatic mode"));
   }
 }
@@ -2055,6 +2067,15 @@ static void updateReadingsAndControl() {
 
   if (!readSensor(&T, &H)) {
     DEBUG_PRINTLN(F("Sensor read failed"));
+    g_T = NAN;
+    g_RH = NAN;
+    g_Td = NAN;
+    g_spread = NAN;
+    // Apply fallback power if not in manual mode
+    if (!g_manual_mode) {
+      g_powerPct = powerFromSpread(g_cfg, g_spread);
+      pwmWritePercent(g_powerPct);
+    }
     return;
   }
 
