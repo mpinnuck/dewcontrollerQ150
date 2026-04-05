@@ -9,10 +9,9 @@
  WiFi: Stored in config, falls back to AP mode if no credentials or connection fails
  Fallback AP SSID "Q150Dew", Password "tinka"
 
- Firmware Version: 1.3
-************************************************************************/
+ ************************************************************************/
 
-#define FIRMWARE_VERSION "3.0"
+#define FIRMWARE_VERSION "4.0"
 #define DEBUG 0   // <<<<<<<<<< SET TO 0 FOR RELEASE BUILD
 
 // =====================================================================
@@ -172,6 +171,7 @@ static volatile bool g_configWritePending = false;
 static char g_configWriteBuffer[CONFIG_BUFFER_SIZE];
 static volatile bool g_cmdWritePending = false;
 static char g_cmdWriteBuffer[CMD_BUFFER_SIZE];
+static portMUX_TYPE g_bleMux = portMUX_INITIALIZER_UNLOCKED;
 
 // =====================================================================
 // ======================== BLE CALLBACKS ===============================
@@ -197,12 +197,14 @@ class ConfigCallbacks : public BLECharacteristicCallbacks {
   
   void onWrite(BLECharacteristic* pCharacteristic) {
     DEBUG_PRINTLN(F("📝 CONFIG callback triggered"));
-    // Minimal - just capture and flag (thread-safe with fixed buffer)
+    // Capture and flag with critical section to prevent reordering
     String value = pCharacteristic->getValue();
     size_t len = min(value.length(), CONFIG_BUFFER_SIZE - 1);
+    portENTER_CRITICAL(&g_bleMux);
     memcpy(g_configWriteBuffer, value.c_str(), len);
     g_configWriteBuffer[len] = '\0';
     g_configWritePending = true;
+    portEXIT_CRITICAL(&g_bleMux);
     DEBUG_PRINTLN(F("📝 CONFIG callback complete"));
   }
 };
@@ -210,12 +212,14 @@ class ConfigCallbacks : public BLECharacteristicCallbacks {
 class CmdCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic* pCharacteristic) {
     DEBUG_PRINTLN(F("🎮 CMD callback triggered"));
-    // Minimal - just capture and flag (thread-safe with fixed buffer)
+    // Capture and flag with critical section to prevent reordering
     String value = pCharacteristic->getValue();
     size_t len = min(value.length(), CMD_BUFFER_SIZE - 1);
+    portENTER_CRITICAL(&g_bleMux);
     memcpy(g_cmdWriteBuffer, value.c_str(), len);
     g_cmdWriteBuffer[len] = '\0';
     g_cmdWritePending = true;
+    portEXIT_CRITICAL(&g_bleMux);
     DEBUG_PRINTLN(F("🎮 CMD callback complete"));
   }
 };
@@ -457,7 +461,7 @@ void checkWiFiStatus() {
   // If we're in AP mode, periodically check if our configured network is available
   if (WiFi.getMode() == WIFI_AP) {
     wifiStatus = "AP Mode: " + String(FALLBACK_AP_SSID);
-    wifiRSSI = -30; // Fake good signal for AP mode
+    wifiRSSI = 0; // No meaningful RSSI in AP mode
     
     // Only try to scan if we have credentials
     if (strlen(g_cfg.wifiSSID) > 0) {
@@ -513,9 +517,9 @@ void checkWiFiStatus() {
     // Check if we're actually connected by sending a probe
     if (WiFi.status() == WL_CONNECTED) {
       // Even if WiFi.status says connected, verify we can reach the AP
-      // by checking RSSI - if it's -127 or 0, we're not really connected
+      // by checking RSSI - if it's -127, we're not really connected
       int rssi = WiFi.RSSI();
-      if (rssi == 0 || rssi == -127) {
+      if (rssi == -127) {
         // Force disconnection
         addLog("⚠️ False connection detected (RSSI=" + String(rssi) + "), forcing reconnect");
         WiFi.disconnect();
@@ -1087,7 +1091,8 @@ void handleRoot() {
           
           // Update WiFi info with color based on connection status
           const wifiInfo = document.getElementById('wifi-info');
-          wifiInfo.innerHTML = `<span>📡 ${data.wifiStatus}</span> <span>${data.wifiRSSI} dBm</span>`;
+          const rssiText = data.wifiRSSI === 0 ? 'N/A' : data.wifiRSSI + ' dBm';
+          wifiInfo.innerHTML = `<span>📡 ${data.wifiStatus}</span> <span>${rssiText}</span>`;
           
           // Check if WiFi is actually disconnected (status contains "Disconnected")
           if (data.wifiStatus.includes('Disconnected')) {
@@ -1525,7 +1530,7 @@ void handleAPIConfig() {
 
   if (server.method() == HTTP_POST) {
     String body = server.arg("plain");
-    StaticJsonDocument<512> doc;
+    StaticJsonDocument<768> doc;
     auto err = deserializeJson(doc, body);
     
     if (!err) {
@@ -1535,8 +1540,10 @@ void handleAPIConfig() {
         
         for (int i = 0; i < g_cfg.count; i++) {
           JsonObject entry = table[i];
-          g_cfg.table[i].spreadC = entry["spreadC"] | entry["spread"] | 0.0f;
-          g_cfg.table[i].powerPct = entry["powerPct"] | entry["power"] | 0;
+          float spread = entry["spreadC"] | entry["spread"] | 0.0f;
+          int power = entry["powerPct"] | entry["power"] | 0;
+          g_cfg.table[i].spreadC = constrain(spread, 0.0f, 20.0f);
+          g_cfg.table[i].powerPct = constrain(power, 0, 100);
         }
         sortTableDescending(g_cfg);
         saveConfig();
@@ -1625,7 +1632,10 @@ void handleAPIWiFi() {
     
     // Update config
     strlcpy(g_cfg.wifiSSID, newSSID.c_str(), sizeof(g_cfg.wifiSSID));
-    strlcpy(g_cfg.wifiPassword, newPassword.c_str(), sizeof(g_cfg.wifiPassword));
+    // Only update password if it's not the placeholder
+    if (newPassword != "********") {
+      strlcpy(g_cfg.wifiPassword, newPassword.c_str(), sizeof(g_cfg.wifiPassword));
+    }
     strlcpy(g_cfg.timezone, newTimezone.c_str(), sizeof(g_cfg.timezone));
     
     saveConfig();
@@ -1820,7 +1830,10 @@ static void sortTableDescending(Config& cfg) {
 
 static uint8_t powerFromSpread(const Config& cfg, float spreadC) {
   if (!cfg.heaterEnabled) return 0;
-  if (isnan(spreadC)) return 30;
+  if (isnan(spreadC)) {
+    addLog("⚠️ Sensor read failed — using fallback heater power 30%");
+    return 30;
+  }
 
   for (int i = cfg.count - 1; i >= 0; i--) {
     if (spreadC <= cfg.table[i].spreadC)
@@ -1835,20 +1848,33 @@ static uint8_t powerFromSpread(const Config& cfg, float spreadC) {
 static void processPendingConfigWrite() {
   if (!g_configWritePending) return;
   
+  // Copy buffer under lock, then process outside lock
+  char localBuf[CONFIG_BUFFER_SIZE];
+  portENTER_CRITICAL(&g_bleMux);
+  memcpy(localBuf, g_configWriteBuffer, CONFIG_BUFFER_SIZE);
+  g_configWritePending = false;
+  portEXIT_CRITICAL(&g_bleMux);
+  
   DEBUG_PRINTLN(F("Processing CONFIG write..."));
   DEBUG_PRINT(F("CONFIG received: "));
-  DEBUG_PRINTLN(g_configWriteBuffer);
+  DEBUG_PRINTLN(localBuf);
   
-  decodeConfigJson(g_configWriteBuffer);
+  decodeConfigJson(localBuf);
   
   DEBUG_PRINTLN(F("CONFIG written"));
-  g_configWritePending = false;
 }
 
 static void processPendingCmdWrite() {
   if (!g_cmdWritePending) return;
   
-  String cmd = g_cmdWriteBuffer;
+  // Copy buffer under lock, then process outside lock
+  char localBuf[CMD_BUFFER_SIZE];
+  portENTER_CRITICAL(&g_bleMux);
+  memcpy(localBuf, g_cmdWriteBuffer, CMD_BUFFER_SIZE);
+  g_cmdWritePending = false;
+  portEXIT_CRITICAL(&g_bleMux);
+  
+  String cmd = localBuf;
   DEBUG_PRINT(F("CMD received: "));
   DEBUG_PRINTLN(cmd);
   
@@ -1868,8 +1894,6 @@ static void processPendingCmdWrite() {
     g_manual_mode = false;
     DEBUG_PRINTLN(F("Returning to automatic mode"));
   }
-  
-  g_cmdWritePending = false;
 }
 
 // =====================================================================
@@ -2073,9 +2097,8 @@ void setup() {
   setupSensor();
   setupBLE();
   
-  // Setup WiFi and Web Server
+  // Setup WiFi and Web Server (setupWiFi calls setupWebServer internally)
   setupWiFi();
-  setupWebServer();
   
   // Set LED to indicate WiFi mode
   pinMode(LED_PIN, OUTPUT);
@@ -2091,7 +2114,6 @@ void loop() {
   static unsigned long lastNotify = 0;
   static unsigned long lastConfigUpdate = 0;
   static unsigned long lastWiFiStatusCheck = 0;
-  static bool ledState = false;
   unsigned long now = millis();
 
   // Process pending BLE operations FIRST (minimal latency)
@@ -2110,18 +2132,7 @@ void loop() {
     checkWiFiStatus();
   }
 
-  // LED indication
-  if (!wifiConnected && WiFi.getMode() == WIFI_AP) {
-    // Blink slowly for AP mode
-    if (now - lastWiFiStatusCheck > 250) {
-      ledState = !ledState;
-      digitalWrite(LED_PIN, ledState);
-    }
-  } else if (wifiConnected) {
-    digitalWrite(LED_PIN, HIGH); // Solid ON for connected
-  }
-
-  // LED status indication
+  // LED status indication (handles AP blink, connected solid, disconnected off)
   handleLEDStatus();
 
   if (now - lastRead >= SENSOR_READ_INTERVAL_MS) {
